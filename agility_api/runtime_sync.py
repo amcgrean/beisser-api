@@ -49,7 +49,10 @@ class SqlServerMirrorExtractor:
 class PostgresMirrorWriter:
     def bootstrap(self) -> None:
         if engine is None:
-            raise RuntimeError("DATABASE_URL is not configured.")
+            raise RuntimeError(
+                "Postgres connection is not configured. Set DATABASE_URL, POSTGRES_DSN, "
+                "or PGHOST/PGDATABASE/PGUSER/PGPASSWORD in C:\\Users\\amcgrean\\python\\api\\.env."
+            )
         from .database import Base
 
         Base.metadata.create_all(engine)
@@ -217,7 +220,10 @@ class SyncRuntime:
     @contextmanager
     def session(self):
         if SessionLocal is None:
-            raise RuntimeError("DATABASE_URL is not configured.")
+            raise RuntimeError(
+                "Postgres connection is not configured. Set DATABASE_URL, POSTGRES_DSN, "
+                "or PGHOST/PGDATABASE/PGUSER/PGPASSWORD in C:\\Users\\amcgrean\\python\\api\\.env."
+            )
         session = SessionLocal()
         try:
             yield session

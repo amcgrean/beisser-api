@@ -15,6 +15,24 @@ def env_int(name: str, default: int) -> int:
     raw = os.getenv(name)
     if not raw:
         return default
+
+
+def build_database_url() -> str:
+    direct = os.getenv("DATABASE_URL") or os.getenv("POSTGRES_DSN") or os.getenv("TOOLBX_POSTGRES_DSN")
+    if direct:
+        return direct
+
+    host = os.getenv("PGHOST")
+    database = os.getenv("PGDATABASE")
+    user = os.getenv("PGUSER")
+    password = os.getenv("PGPASSWORD")
+    port = os.getenv("PGPORT", "5432")
+    sslmode = os.getenv("PGSSLMODE", "require")
+
+    if all([host, database, user, password]):
+        return f"postgresql://{user}:{password}@{host}:{port}/{database}?sslmode={sslmode}"
+
+    return ""
     try:
         return int(raw)
     except ValueError:
@@ -23,7 +41,7 @@ def env_int(name: str, default: int) -> int:
 
 @dataclass(slots=True)
 class Settings:
-    database_url: str = os.getenv("DATABASE_URL", "")
+    database_url: str = build_database_url()
     sqlserver_dsn: str = os.getenv("SQLSERVER_DSN", "")
     sqlserver_server: str = os.getenv("SQLSERVER_SERVER", "")
     sqlserver_db: str = os.getenv("SQLSERVER_DB", "AgilitySQL")

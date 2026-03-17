@@ -54,3 +54,13 @@ This is the fastest way to confirm whether the first mirror slice exists under t
 - If update/change columns exist: use incremental polling.
 - If not: design rolling windows or replace-style sync for that family.
 - If procedures contain important filters: preserve those rules in Postgres views or extractor SQL.
+
+## After first sync
+
+Validate the mirror with:
+
+```powershell
+python scripts/verify_counts.py
+python scripts/verify_samples.py cust
+python scripts/verify_samples.py so_header
+```
