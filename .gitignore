@@ -1,0 +1,14 @@
+.env
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+dist/
+build/
+logs/
+state/
+discovery_output/
+*.docx
+book.html
+dmsi_index_info.json
