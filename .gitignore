@@ -12,3 +12,6 @@ discovery_output/
 *.docx
 book.html
 dmsi_index_info.json
+db_config.json
+discovery_output/*.csv
+discovery_output/*.json
