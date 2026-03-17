@@ -1,3 +1,5 @@
-pyodbc
-psycopg2-binary
 python-dotenv
+sqlalchemy
+alembic
+psycopg2-binary
+pyodbc
