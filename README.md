@@ -16,12 +16,17 @@ Standalone Raspberry Pi sync service for mirroring Agility SQL Server into norma
 - `agility_api/sqlserver.py`
 - `agility_api/discovery_queries.py`
 - `agility_api/discovery_runner.py`
+- `agility_api/first_slice_plan.py`
 - `agility_api/models.py`
 - `agility_api/mirror_framework.py`
+- `agility_api/sync_definitions.py`
+- `agility_api/runtime_sync.py`
 - `agility_api/worker.py`
+- `scripts/bootstrap_schema.py`
 - `scripts/run_discovery.py`
 - `scripts/run_target_gap_analysis.py`
 - `docs/CENTRAL_AGILITY_MIRROR_CUTOVER.md`
+- `docs/FIRST_SLICE_DISCOVERY_FINDINGS.md`
 
 ## Next run steps
 
@@ -30,5 +35,6 @@ Standalone Raspberry Pi sync service for mirroring Agility SQL Server into norma
 3. Install dependencies with `pip install -r requirements.txt`
 4. Run discovery with `python scripts/run_discovery.py`
 5. Review `docs/DISCOVERY_WORKFLOW.md`
-6. Wire migrations/bootstrap schema creation
-7. Run the worker on the Pi
+6. Bootstrap Postgres tables with `python scripts/bootstrap_schema.py`
+7. Run one sync cycle with `python -m agility_api.worker --bootstrap --once`
+8. Move the first-slice runtime to the Pi
