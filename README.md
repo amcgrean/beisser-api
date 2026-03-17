@@ -13,9 +13,14 @@ Standalone Raspberry Pi sync service for mirroring Agility SQL Server into norma
 
 - `agility_api/config.py`
 - `agility_api/database.py`
+- `agility_api/sqlserver.py`
+- `agility_api/discovery_queries.py`
+- `agility_api/discovery_runner.py`
 - `agility_api/models.py`
 - `agility_api/mirror_framework.py`
 - `agility_api/worker.py`
+- `scripts/run_discovery.py`
+- `scripts/run_target_gap_analysis.py`
 - `docs/CENTRAL_AGILITY_MIRROR_CUTOVER.md`
 
 ## Next run steps
@@ -23,5 +28,7 @@ Standalone Raspberry Pi sync service for mirroring Agility SQL Server into norma
 1. Copy `.env.example` to `.env`
 2. Fill in SQL Server and Postgres credentials
 3. Install dependencies with `pip install -r requirements.txt`
-4. Wire migrations/bootstrap schema creation
-5. Run the worker on the Pi
+4. Run discovery with `python scripts/run_discovery.py`
+5. Review `docs/DISCOVERY_WORKFLOW.md`
+6. Wire migrations/bootstrap schema creation
+7. Run the worker on the Pi
