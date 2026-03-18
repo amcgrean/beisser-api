@@ -253,3 +253,95 @@ class ERPMirrorArOpen(Base, MirrorSyncMetadataMixin):
     ref_num_seq: Mapped[int | None] = mapped_column(Integer)
     paid_in_full_date: Mapped[datetime | None] = mapped_column(DateTime)
     open_flag: Mapped[bool | None] = mapped_column(Boolean)
+
+
+class ERPMirrorArOpenDetail(Base, MirrorSyncMetadataMixin):
+    __tablename__ = "erp_mirror_aropendt"
+    __table_args__ = (UniqueConstraint("system_id", "ref_num", "ref_num_seq", name="uq_erp_mirror_aropendt_key"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    system_id: Mapped[str | None] = mapped_column(String(32), index=True)
+    ref_num: Mapped[str] = mapped_column(String(64), index=True)
+    ref_num_seq: Mapped[int] = mapped_column(Integer)
+    cust_key: Mapped[str | None] = mapped_column(String(64), index=True)
+    ref_type: Mapped[str | None] = mapped_column(String(16))
+    amount: Mapped[float | None] = mapped_column(Numeric(18, 2))
+    open_amt: Mapped[float | None] = mapped_column(Numeric(18, 2))
+    due_date: Mapped[datetime | None] = mapped_column(DateTime)
+    merch_amt: Mapped[float | None] = mapped_column(Numeric(18, 2))
+    open_merch_amt: Mapped[float | None] = mapped_column(Numeric(18, 2))
+    sales_tax_amt: Mapped[float | None] = mapped_column(Numeric(18, 2))
+    sales_tax_open_amt: Mapped[float | None] = mapped_column(Numeric(18, 2))
+    fin_charge_amt: Mapped[float | None] = mapped_column(Numeric(18, 2))
+    fin_charge_open: Mapped[float | None] = mapped_column(Numeric(18, 2))
+    discount_date: Mapped[datetime | None] = mapped_column(DateTime)
+    discount_amount: Mapped[float | None] = mapped_column(Numeric(18, 2))
+    discount_amount_open: Mapped[float | None] = mapped_column(Numeric(18, 2))
+    write_off_amt: Mapped[float | None] = mapped_column(Numeric(18, 2))
+    write_off_reason: Mapped[str | None] = mapped_column(String(128))
+    shipto_seq: Mapped[int | None] = mapped_column(Integer)
+    shipment_num: Mapped[int | None] = mapped_column(Integer)
+    tran_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    open_flag: Mapped[bool | None] = mapped_column(Boolean)
+
+
+class ERPMirrorPrintTransaction(Base, MirrorSyncMetadataMixin):
+    __tablename__ = "erp_mirror_print_transaction"
+    __table_args__ = (
+        UniqueConstraint("system_id", "tran_id", "tran_type", "seq_num", name="uq_erp_mirror_print_transaction_key"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    system_id: Mapped[str | None] = mapped_column(String(32), index=True)
+    tran_id: Mapped[str] = mapped_column(String(64), index=True)
+    tran_type: Mapped[str] = mapped_column(String(32))
+    seq_num: Mapped[int] = mapped_column(Integer)
+    rpt_job: Mapped[int | None] = mapped_column(Integer)
+    rpt_key: Mapped[int | None] = mapped_column(Integer)
+    created_by: Mapped[str | None] = mapped_column(String(64))
+    created_date: Mapped[datetime | None] = mapped_column(DateTime)
+    update_by: Mapped[str | None] = mapped_column(String(64))
+    update_date: Mapped[datetime | None] = mapped_column(DateTime)
+    update_time: Mapped[str | None] = mapped_column(String(32))
+    processed: Mapped[bool | None] = mapped_column(Boolean)
+    branch: Mapped[str | None] = mapped_column(String(32), index=True)
+    last_print_record: Mapped[bool | None] = mapped_column(Boolean)
+    cust_key: Mapped[str | None] = mapped_column(String(64), index=True)
+    invoice_date: Mapped[datetime | None] = mapped_column(DateTime)
+    original_print_date: Mapped[datetime | None] = mapped_column(DateTime)
+    prev_print_status: Mapped[str | None] = mapped_column(String(32))
+    tran_seq: Mapped[int | None] = mapped_column(Integer)
+    shipment_num: Mapped[int | None] = mapped_column(Integer)
+    num_labels: Mapped[int | None] = mapped_column(Integer)
+    pick_id: Mapped[int | None] = mapped_column(Integer)
+    pick_seq: Mapped[int | None] = mapped_column(Integer)
+    print_file_name: Mapped[str | None] = mapped_column(String(255))
+
+
+class ERPMirrorPrintTransactionDetail(Base, MirrorSyncMetadataMixin):
+    __tablename__ = "erp_mirror_print_transaction_detail"
+    __table_args__ = (
+        UniqueConstraint(
+            "system_id",
+            "tran_id",
+            "printer_id",
+            "printer_destination",
+            name="uq_erp_mirror_print_transaction_detail_key",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    system_id: Mapped[str | None] = mapped_column(String(32), index=True)
+    tran_id: Mapped[str] = mapped_column(String(64), index=True)
+    printer_id: Mapped[str] = mapped_column(String(64))
+    printer_destination: Mapped[str] = mapped_column(String(128))
+    created_by: Mapped[str | None] = mapped_column(String(64))
+    created_time: Mapped[str | None] = mapped_column(String(32))
+    update_by: Mapped[str | None] = mapped_column(String(64))
+    update_time: Mapped[str | None] = mapped_column(String(32))
+    update_date: Mapped[datetime | None] = mapped_column(DateTime)
+    created_date: Mapped[datetime | None] = mapped_column(DateTime)
+    rpt_job: Mapped[int | None] = mapped_column(Integer)
+    rpt_key: Mapped[int | None] = mapped_column(Integer)
+    num_copies: Mapped[int | None] = mapped_column(Integer)
+    form_footer: Mapped[str | None] = mapped_column(String(255))
