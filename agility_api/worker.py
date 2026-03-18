@@ -14,7 +14,7 @@ def main() -> None:
     parser.add_argument("--bootstrap", action="store_true", help="create/update mirror tables before syncing")
     parser.add_argument(
         "--family",
-        choices=["master", "operational"],
+        choices=["master", "operational", "ar", "document"],
         help="run only one sync family",
     )
     parser.add_argument(
