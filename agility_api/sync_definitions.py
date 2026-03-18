@@ -28,6 +28,7 @@ class ExtractorDefinition:
     natural_keys: tuple[str, ...]
     column_map: dict[str, str]
     watermark_columns: tuple[str, ...]
+    default_order_by: tuple[str, ...] | None = None
 
 
 MASTER_DEFINITIONS = [
@@ -40,17 +41,18 @@ MASTER_DEFINITIONS = [
         cadence_seconds=300,
         natural_keys=("system_id", "cust_key"),
         watermark_columns=("pro2modified", "update_date"),
+        default_order_by=("system_id", "cust_key"),
         column_map={
             "system_id": "system_id",
             "cust_key": "cust_key",
             "cust_code": "cust_code",
             "cust_name": "cust_name",
             "phone": "phone",
-            "email": "email",
-            "balance": "balance",
-            "credit_limit": "credit_limit",
-            "credit_hold": "credit_account",
-            "cust_type": "cust_type",
+            "email_address": "email",
+            "current_balance": "balance",
+            "credit_limit_amt": "credit_limit",
+            "customer_class": "cust_type",
+            "home_branch": "branch_code",
         },
     ),
     ExtractorDefinition(
@@ -62,6 +64,7 @@ MASTER_DEFINITIONS = [
         cadence_seconds=300,
         natural_keys=("system_id", "cust_key", "seq_num"),
         watermark_columns=("pro2modified", "update_date"),
+        default_order_by=("system_id", "cust_key", "seq_num"),
         column_map={
             "system_id": "system_id",
             "cust_key": "cust_key",
@@ -85,6 +88,7 @@ MASTER_DEFINITIONS = [
         cadence_seconds=300,
         natural_keys=("system_id", "item_ptr"),
         watermark_columns=("pro2modified", "update_date"),
+        default_order_by=("system_id", "item_ptr"),
         column_map={
             "system_id": "system_id",
             "item_ptr": "item_ptr",
@@ -105,6 +109,7 @@ MASTER_DEFINITIONS = [
         cadence_seconds=300,
         natural_keys=("system_id", "item_ptr"),
         watermark_columns=("pro2modified", "update_date"),
+        default_order_by=("system_id", "item_ptr"),
         column_map={
             "system_id": "system_id",
             "item_ptr": "item_ptr",
@@ -123,6 +128,7 @@ MASTER_DEFINITIONS = [
         cadence_seconds=300,
         natural_keys=("system_id", "item_ptr", "uom_ptr"),
         watermark_columns=("pro2modified", "update_date"),
+        default_order_by=("system_id", "item_ptr", "uom_ptr"),
         column_map={
             "system_id": "system_id",
             "item_ptr": "item_ptr",
@@ -149,6 +155,7 @@ OPERATIONAL_DEFINITIONS = [
         cadence_seconds=5,
         natural_keys=("system_id", "so_id"),
         watermark_columns=("pro2modified", "update_date"),
+        default_order_by=("system_id", "so_id"),
         column_map={
             "system_id": "system_id",
             "so_id": "so_id",
@@ -174,6 +181,7 @@ OPERATIONAL_DEFINITIONS = [
         cadence_seconds=5,
         natural_keys=("system_id", "so_id", "sequence"),
         watermark_columns=("pro2modified", "update_date"),
+        default_order_by=("system_id", "so_id", "sequence"),
         column_map={
             "system_id": "system_id",
             "so_id": "so_id",
@@ -196,6 +204,7 @@ OPERATIONAL_DEFINITIONS = [
         cadence_seconds=5,
         natural_keys=("system_id", "so_id", "shipment_num"),
         watermark_columns=("pro2modified", "update_date"),
+        default_order_by=("system_id", "so_id", "shipment_num"),
         column_map={
             "system_id": "system_id",
             "so_id": "so_id",
@@ -223,6 +232,7 @@ OPERATIONAL_DEFINITIONS = [
         cadence_seconds=5,
         natural_keys=("system_id", "so_id", "shipment_num", "sequence"),
         watermark_columns=("pro2modified", "update_date"),
+        default_order_by=("system_id", "so_id", "shipment_num", "sequence"),
         column_map={
             "system_id": "system_id",
             "so_id": "so_id",
@@ -241,3 +251,12 @@ FIRST_SYNC_DEFINITIONS = MASTER_DEFINITIONS + OPERATIONAL_DEFINITIONS
 
 def current_utc_batch_values() -> dict[str, Any]:
     return {}
+
+
+def definitions_for_family(family_name: str) -> list[ExtractorDefinition]:
+    return [definition for definition in FIRST_SYNC_DEFINITIONS if definition.family.value == family_name]
+
+
+def definitions_for_names(names: list[str]) -> list[ExtractorDefinition]:
+    wanted = set(names)
+    return [definition for definition in FIRST_SYNC_DEFINITIONS if definition.name in wanted]

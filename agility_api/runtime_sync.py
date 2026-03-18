@@ -3,14 +3,14 @@ from __future__ import annotations
 import hashlib
 import json
 from contextlib import contextmanager
-from dataclasses import asdict
 from datetime import datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import inspect, text
+from psycopg2.extras import execute_values
+from sqlalchemy import text
 
-from .config import get_settings
+from .config import configure_logging, get_settings
 from .database import SessionLocal, engine
 from .models import ERPSyncBatch, ERPSyncState, ERPSyncTableState
 from .sqlserver import connect_sqlserver
@@ -22,6 +22,11 @@ def utcnow() -> datetime:
 
 
 class SqlServerMirrorExtractor:
+    def __init__(self, logger, fetch_batch_size: int, operational_history_years: int):
+        self.logger = logger
+        self.fetch_batch_size = fetch_batch_size
+        self.operational_history_years = operational_history_years
+
     def fetch_rows(self, definition: ExtractorDefinition, watermark: datetime | None) -> list[dict[str, Any]]:
         alias_parts = [
             f"{source_column} AS [{target_column}]"
@@ -34,19 +39,59 @@ class SqlServerMirrorExtractor:
         aliases = ", ".join(alias_parts)
         sql = f"SELECT {aliases} FROM {definition.source_table}"
         params: list[Any] = []
-        if watermark:
+        effective_watermark = self._effective_watermark(definition, watermark)
+        if effective_watermark:
             predicates = [f"{column} >= ?" for column in definition.watermark_columns]
             sql += " WHERE " + " OR ".join(predicates)
-            params = [watermark] * len(definition.watermark_columns)
+            params = [effective_watermark] * len(definition.watermark_columns)
+        if definition.default_order_by:
+            sql += " ORDER BY " + ", ".join(definition.default_order_by)
 
         with connect_sqlserver() as conn:
             cursor = conn.cursor()
             cursor.execute(sql, params)
             columns = [col[0] for col in cursor.description]
-            return [dict(zip(columns, row)) for row in cursor.fetchall()]
+            rows: list[dict[str, Any]] = []
+            chunk_index = 0
+            while True:
+                batch = cursor.fetchmany(self.fetch_batch_size)
+                if not batch:
+                    break
+                chunk_index += 1
+                rows.extend(dict(zip(columns, row)) for row in batch)
+                self.logger.info(
+                    "[%s] fetched source chunk %s (%s rows, %s total)",
+                    definition.name,
+                    chunk_index,
+                    len(batch),
+                    len(rows),
+                )
+            return rows
+
+    def _effective_watermark(self, definition: ExtractorDefinition, watermark: datetime | None) -> datetime | None:
+        lower_bound = None
+        now_cutoff = utcnow() + timedelta(days=1)
+        sane_watermark = watermark
+        if sane_watermark and sane_watermark > now_cutoff:
+            self.logger.warning(
+                "[%s] ignoring future watermark %s and falling back to rolling window",
+                definition.name,
+                sane_watermark,
+            )
+            sane_watermark = None
+        if definition.family.value == "operational" and self.operational_history_years > 0:
+            lower_bound = utcnow() - timedelta(days=365 * self.operational_history_years)
+        if sane_watermark and lower_bound:
+            return max(sane_watermark, lower_bound)
+        return sane_watermark or lower_bound
 
 
 class PostgresMirrorWriter:
+    def __init__(self, logger, write_batch_size: int):
+        self.logger = logger
+        self.write_batch_size = write_batch_size
+        self.merge_batch_size = get_settings().merge_batch_size
+
     def bootstrap(self) -> None:
         if engine is None:
             raise RuntimeError(
@@ -61,35 +106,80 @@ class PostgresMirrorWriter:
         if not rows:
             return 0
 
-        prepared_rows = [self._prepare_row(definition, row, batch_id) for row in rows]
-        columns = list(prepared_rows[0].keys())
+        total_written = 0
         temp_table = f"tmp_{definition.target_table}_{uuid4().hex[:8]}"
+        first_prepared = self._prepare_row(definition, rows[0], batch_id)
+        columns = list(first_prepared.keys())
         update_columns = [column for column in columns if column not in definition.natural_keys]
 
-        with engine.begin() as conn:
-            conn.execute(text(f"CREATE TEMP TABLE {temp_table} (LIKE {definition.target_table} INCLUDING DEFAULTS) ON COMMIT DROP"))
-            insert_sql = text(
-                f"""
-                INSERT INTO {temp_table} ({", ".join(columns)})
-                VALUES ({", ".join(f":{column}" for column in columns)})
-                """
-            )
-            conn.execute(insert_sql, prepared_rows)
+        raw_connection = engine.raw_connection()
+        try:
+            with raw_connection.cursor() as cursor:
+                cursor.execute("SET statement_timeout = 0")
+                cursor.execute(
+                    f"CREATE TEMP TABLE {temp_table} "
+                    f"(LIKE {definition.target_table} INCLUDING DEFAULTS) ON COMMIT DROP"
+                )
 
-            update_clause = ", ".join(f"{column} = EXCLUDED.{column}" for column in update_columns)
-            upsert_sql = text(
-                f"""
-                INSERT INTO {definition.target_table} ({", ".join(columns)})
-                SELECT {", ".join(columns)} FROM {temp_table}
-                ON CONFLICT ({", ".join(definition.natural_keys)})
-                DO UPDATE SET {update_clause}
-                """
-            )
-            conn.execute(upsert_sql)
-        return len(prepared_rows)
+                insert_sql = (
+                    f"INSERT INTO {temp_table} ({', '.join(columns)}) VALUES %s"
+                )
+                for index in range(0, len(rows), self.write_batch_size):
+                    raw_chunk = rows[index:index + self.write_batch_size]
+                    prepared_rows = [self._prepare_row(definition, row, batch_id) for row in raw_chunk]
+                    values = [tuple(prepared_row[column] for column in columns) for prepared_row in prepared_rows]
+                    execute_values(cursor, insert_sql, values, page_size=len(values))
+                    total_written += len(prepared_rows)
+                    self.logger.info(
+                        "[%s] staged mirror chunk %s-%s (%s rows, %s total)",
+                        definition.name,
+                        index + 1,
+                        index + len(prepared_rows),
+                        len(prepared_rows),
+                        total_written,
+                    )
+
+                update_clause = ", ".join(f"{column} = EXCLUDED.{column}" for column in update_columns)
+                merged_total = 0
+                while True:
+                    merge_sql = (
+                        f"WITH moved AS ("
+                        f" DELETE FROM {temp_table}"
+                        f" WHERE ctid IN (SELECT ctid FROM {temp_table} LIMIT {self.merge_batch_size})"
+                        f" RETURNING {', '.join(columns)}"
+                        f" ) "
+                        f"INSERT INTO {definition.target_table} ({', '.join(columns)}) "
+                        f"SELECT {', '.join(columns)} FROM moved "
+                        f"ON CONFLICT ({', '.join(definition.natural_keys)}) "
+                        f"DO UPDATE SET {update_clause}"
+                    )
+                    cursor.execute(merge_sql)
+                    merged_rows = cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
+                    if merged_rows == 0:
+                        break
+                    merged_total += merged_rows
+                    self.logger.info(
+                        "[%s] merged target batch (%s rows, %s total)",
+                        definition.name,
+                        merged_rows,
+                        merged_total,
+                    )
+            raw_connection.commit()
+        except Exception:
+            if getattr(raw_connection, "closed", 1) == 0:
+                raw_connection.rollback()
+            raise
+        finally:
+            if getattr(raw_connection, "closed", 1) == 0:
+                raw_connection.close()
+
+        self.logger.info("[%s] merged staged rows into %s", definition.name, definition.target_table)
+        return total_written
 
     def _prepare_row(self, definition: ExtractorDefinition, row: dict[str, Any], batch_id: str) -> dict[str, Any]:
         payload = {key: value for key, value in row.items() if not key.startswith("__wm_")}
+        if definition.name == "so_detail" and isinstance(payload.get("bo"), bool):
+            payload["bo"] = 1 if payload["bo"] else 0
         payload["source_updated_at"] = self._coalesce_source_updated_at(definition, row)
         payload["synced_at"] = utcnow()
         payload["sync_batch_id"] = batch_id
@@ -116,16 +206,24 @@ class PostgresMirrorWriter:
 class SyncRuntime:
     def __init__(self):
         self.settings = get_settings()
-        self.extractor = SqlServerMirrorExtractor()
-        self.writer = PostgresMirrorWriter()
+        self.logger = configure_logging()
+        self.extractor = SqlServerMirrorExtractor(
+            self.logger,
+            self.settings.batch_size,
+            self.settings.operational_history_years,
+        )
+        self.writer = PostgresMirrorWriter(self.logger, self.settings.batch_size)
 
     def bootstrap(self) -> None:
+        self.logger.info("Bootstrapping Postgres schema")
         self.writer.bootstrap()
+        self.logger.info("Schema bootstrap complete")
 
     def run_once(self, definitions: list[ExtractorDefinition] | None = None) -> str:
         definitions = definitions or FIRST_SYNC_DEFINITIONS
         batch_id = uuid4().hex
         started = utcnow()
+        self.logger.info("Starting sync batch %s for %s tables", batch_id, len(definitions))
         batch = ERPSyncBatch(
             batch_id=batch_id,
             worker_name=self.settings.worker_name,
@@ -139,35 +237,60 @@ class SyncRuntime:
             session.add(batch)
             session.commit()
 
-            total_rows = 0
-            status = "success"
-            last_error = None
+        total_rows = 0
+        status = "success"
+        last_error = None
 
-            for definition in definitions:
+        for definition in definitions:
+            with self.session() as session:
                 table_state = self._get_or_create_table_state(session, definition)
                 watermark = table_state.last_source_updated_at
-                started_table = utcnow()
-                try:
-                    rows = self.extractor.fetch_rows(definition, watermark)
-                    merged = self.writer.upsert_rows(definition, rows, batch_id)
-                    total_rows += merged
+
+            started_table = utcnow()
+            self.logger.info("[%s] starting table sync (watermark=%s)", definition.name, watermark)
+            try:
+                rows = self.extractor.fetch_rows(definition, watermark)
+                self.logger.info("[%s] fetched %s source rows", definition.name, len(rows))
+                merged = self.writer.upsert_rows(definition, rows, batch_id)
+                total_rows += merged
+                with self.session() as session:
+                    table_state = self._get_or_create_table_state(session, definition)
                     table_state.last_batch_id = batch_id
                     table_state.last_status = "success"
                     table_state.last_row_count = merged
                     table_state.last_duration_ms = int((utcnow() - started_table).total_seconds() * 1000)
                     table_state.last_success_at = utcnow()
                     table_state.last_error = None
-                    table_state.last_source_updated_at = self._max_source_updated_at(rows)
-                except Exception as exc:
-                    status = "error"
-                    last_error = str(exc)
+                    max_source_updated_at = self._max_source_updated_at(definition, rows)
+                    if max_source_updated_at is not None:
+                        table_state.last_source_updated_at = max_source_updated_at
+                    session.add(table_state)
+                    session.commit()
+                    self.logger.info(
+                        "[%s] sync complete: merged=%s duration_ms=%s new_watermark=%s",
+                        definition.name,
+                        merged,
+                        table_state.last_duration_ms,
+                        table_state.last_source_updated_at,
+                    )
+            except Exception as exc:
+                status = "error"
+                last_error = f"{definition.name}: {exc}"
+                self.logger.exception("[%s] sync failed", definition.name)
+                with self.session() as session:
+                    table_state = self._get_or_create_table_state(session, definition)
                     table_state.last_status = "error"
                     table_state.last_error = last_error
                     table_state.last_error_at = utcnow()
-                session.add(table_state)
+                    session.add(table_state)
+                    session.commit()
 
-            batch.finished_at = utcnow()
-            batch.duration_ms = int((batch.finished_at - started).total_seconds() * 1000)
+        finished_at = utcnow()
+        duration_ms = int((finished_at - started).total_seconds() * 1000)
+        with self.session() as session:
+            batch = session.query(ERPSyncBatch).filter_by(batch_id=batch_id).one()
+            batch.finished_at = finished_at
+            batch.duration_ms = duration_ms
             batch.rows_extracted = total_rows
             batch.rows_staged = total_rows
             batch.rows_upserted = total_rows
@@ -177,6 +300,13 @@ class SyncRuntime:
             self._record_heartbeat(session, batch_id, status, total_rows, last_error)
             session.add(batch)
             session.commit()
+        self.logger.info(
+            "Completed sync batch %s status=%s rows=%s duration_ms=%s",
+            batch_id,
+            status,
+            total_rows,
+            duration_ms,
+        )
 
         return batch_id
 
@@ -209,11 +339,15 @@ class SyncRuntime:
             heartbeat.last_error_at = utcnow()
         session.add(heartbeat)
 
-    def _max_source_updated_at(self, rows: list[dict[str, Any]]) -> datetime | None:
+    def _max_source_updated_at(self, definition: ExtractorDefinition, rows: list[dict[str, Any]]) -> datetime | None:
         candidates = []
+        now_cutoff = utcnow() + timedelta(days=1)
         for row in rows:
-            for value in row.values():
-                if isinstance(value, datetime):
+            for column in definition.watermark_columns:
+                hidden_value = row.get(f"__wm_{column}")
+                mapped_column = definition.column_map.get(column, column)
+                value = hidden_value or row.get(mapped_column)
+                if isinstance(value, datetime) and value <= now_cutoff:
                     candidates.append(value)
         return max(candidates) if candidates else None
 

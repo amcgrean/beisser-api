@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -14,6 +15,10 @@ load_dotenv(ROOT / ".env", override=False)
 def env_int(name: str, default: int) -> int:
     raw = os.getenv(name)
     if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
         return default
 
 
@@ -33,10 +38,6 @@ def build_database_url() -> str:
         return f"postgresql://{user}:{password}@{host}:{port}/{database}?sslmode={sslmode}"
 
     return ""
-    try:
-        return int(raw)
-    except ValueError:
-        return default
 
 
 @dataclass(slots=True)
@@ -55,9 +56,37 @@ class Settings:
     operational_cadence_seconds: int = env_int("SYNC_OPERATIONAL_CADENCE_SECONDS", 5)
     ar_cadence_seconds: int = env_int("SYNC_AR_CADENCE_SECONDS", 300)
     document_cadence_seconds: int = env_int("SYNC_DOCUMENT_CADENCE_SECONDS", 300)
+    operational_history_years: int = env_int("SYNC_OPERATIONAL_HISTORY_YEARS", 5)
     batch_size: int = env_int("SYNC_BATCH_SIZE", 1000)
+    merge_batch_size: int = env_int("SYNC_MERGE_BATCH_SIZE", 50000)
     staging_schema: str = os.getenv("MIRROR_STAGING_SCHEMA", "public")
+    log_level: str = os.getenv("LOG_LEVEL", "INFO").upper()
+    log_dir: str = os.getenv("LOG_DIR", str(ROOT / "logs"))
 
 
 def get_settings() -> Settings:
     return Settings()
+
+
+def configure_logging() -> logging.Logger:
+    settings = get_settings()
+    log_dir = Path(settings.log_dir)
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    logger = logging.getLogger("agility_api")
+    if logger.handlers:
+        return logger
+
+    level = getattr(logging, settings.log_level, logging.INFO)
+    logger.setLevel(level)
+    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
+    logger.addHandler(stream_handler)
+
+    file_handler = logging.FileHandler(log_dir / "agility_api.log", encoding="utf-8")
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+
+    return logger
