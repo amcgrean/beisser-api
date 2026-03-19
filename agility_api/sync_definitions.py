@@ -12,12 +12,19 @@ from .models import (
     ERPMirrorItem,
     ERPMirrorItemBranch,
     ERPMirrorItemUomConv,
+    ERPMirrorPickDetail,
+    ERPMirrorPickHeader,
     ERPMirrorPrintTransaction,
     ERPMirrorPrintTransactionDetail,
+    ERPMirrorPurchaseOrderDetail,
+    ERPMirrorPurchaseOrderHeader,
+    ERPMirrorReceivingDetail,
+    ERPMirrorReceivingHeader,
     ERPMirrorSalesOrderDetail,
     ERPMirrorSalesOrderHeader,
     ERPMirrorShipmentDetail,
     ERPMirrorShipmentHeader,
+    ERPMirrorWorkOrderHeader,
 )
 
 
@@ -85,7 +92,68 @@ MASTER_DEFINITIONS = [
     ),
     ExtractorDefinition(
         name="item",
-        source_table="dbo.item",
+        source_table="""
+            (
+                SELECT
+                    i.system_id,
+                    i.item_ptr,
+                    i.item,
+                    i.description,
+                    i.short_des,
+                    i.ext_description,
+                    i.customer_description,
+                    i.size_,
+                    i.type,
+                    i.stocking_uom,
+                    i.costing_uom,
+                    i.tally_uom,
+                    i.default_uom_conv_factor,
+                    i.direct_only,
+                    i.temporary_,
+                    i.pg_ptr,
+                    i.link_product_group,
+                    i.keyword_string,
+                    i.pro2modified,
+                    i.update_date
+                FROM dbo.item i
+                WHERE
+                    i.item IS NULL
+                    OR UPPER(i.item) NOT LIKE 'Z%'
+                    OR COALESCE(i.created_date, i.update_date, i.pro2modified) >= DATEADD(year, -3, GETDATE())
+                    OR EXISTS (
+                        SELECT 1
+                        FROM dbo.so_detail sod
+                        JOIN dbo.so_header soh
+                            ON soh.system_id = sod.system_id
+                           AND soh.so_id = sod.so_id
+                        WHERE sod.system_id = i.system_id
+                          AND sod.item_ptr = i.item_ptr
+                          AND COALESCE(
+                              soh.order_date,
+                              soh.created_date,
+                              soh.expect_date,
+                              soh.update_date,
+                              soh.pro2modified
+                          ) >= DATEADD(year, -3, GETDATE())
+                    )
+                    OR EXISTS (
+                        SELECT 1
+                        FROM dbo.shipments_detail sd
+                        JOIN dbo.shipments_header sh
+                            ON sh.system_id = sd.system_id
+                           AND sh.so_id = sd.so_id
+                           AND sh.shipment_num = sd.shipment_num
+                        WHERE sd.system_id = i.system_id
+                          AND sd.item_ptr = i.item_ptr
+                          AND COALESCE(
+                              sh.invoice_date,
+                              sh.ship_date,
+                              sh.update_date,
+                              sh.pro2modified
+                          ) >= DATEADD(year, -3, GETDATE())
+                    )
+            ) item_src
+        """,
         target_table="erp_mirror_item",
         model=ERPMirrorItem,
         family=SyncFamily.MASTER,
@@ -98,10 +166,20 @@ MASTER_DEFINITIONS = [
             "item_ptr": "item_ptr",
             "item": "item",
             "description": "description",
+            "short_des": "short_des",
+            "ext_description": "ext_description",
+            "customer_description": "customer_description",
             "size_": "size_",
             "type": "type",
             "stocking_uom": "stocking_uom",
+            "costing_uom": "costing_uom",
+            "tally_uom": "tally_uom",
+            "default_uom_conv_factor": "default_uom_conv_factor",
+            "direct_only": "direct_only",
             "temporary_": "temporary_",
+            "pg_ptr": "pg_ptr",
+            "link_product_group": "link_product_group",
+            "keyword_string": "keyword_string",
         },
     ),
     ExtractorDefinition(
@@ -117,10 +195,18 @@ MASTER_DEFINITIONS = [
         column_map={
             "system_id": "system_id",
             "item_ptr": "item_ptr",
+            "item": "item",
             "active_flag": "active_flag",
+            "stock": "stock",
             "contentcode": "contentcode",
             "buyer_id": "buyer_id",
             "handling_code": "handling_code",
+            "display_uom": "display_uom",
+            "picking_uom": "picking_uom",
+            "weight": "weight",
+            "weight_uom": "weight_uom",
+            "keyword_string": "keyword_string",
+            "discontinued_item": "discontinued_item",
         },
     ),
     ExtractorDefinition(
@@ -245,6 +331,238 @@ OPERATIONAL_DEFINITIONS = [
             "qty": "qty",
             "price": "price",
             "item_ptr": "item_ptr",
+        },
+    ),
+    ExtractorDefinition(
+        name="po_header",
+        source_table="dbo.po_header",
+        target_table="erp_mirror_po_header",
+        model=ERPMirrorPurchaseOrderHeader,
+        family=SyncFamily.OPERATIONAL,
+        cadence_seconds=5,
+        natural_keys=("system_id", "po_id"),
+        watermark_columns=("pro2modified", "update_date", "created_date"),
+        default_order_by=("system_id", "po_id"),
+        column_map={
+            "system_id": "system_id",
+            "po_id": "po_id",
+            "purchase_type": "purchase_type",
+            "supplier_key": "supplier_key",
+            "shipfrom_seq": "shipfrom_seq",
+            "order_date": "order_date",
+            "expect_date": "expect_date",
+            "due_date": "due_date",
+            "buyer": "buyer",
+            "reference": "reference",
+            "ship_via": "ship_via",
+            "current_receive_no": "current_receive_no",
+            "po_status": "po_status",
+            "canceled": "canceled",
+            "wms_status": "wms_status",
+            "received_manually": "received_manually",
+            "mwt_recv_complete": "mwt_recv_complete",
+            "mwt_recv_complete_datetime": "mwt_recv_complete_datetime",
+            "created_date": "created_date",
+            "update_date": "update_date",
+        },
+    ),
+    ExtractorDefinition(
+        name="po_detail",
+        source_table="dbo.po_detail",
+        target_table="erp_mirror_po_detail",
+        model=ERPMirrorPurchaseOrderDetail,
+        family=SyncFamily.OPERATIONAL,
+        cadence_seconds=5,
+        natural_keys=("system_id", "po_id", "sequence"),
+        watermark_columns=("pro2modified", "update_date", "created_date"),
+        default_order_by=("system_id", "po_id", "sequence"),
+        column_map={
+            "system_id": "system_id",
+            "po_id": "po_id",
+            "sequence": "sequence",
+            "item_ptr": "item_ptr",
+            "size_": "size_",
+            "po_desc": "po_desc",
+            "qty_ordered": "qty_ordered",
+            "uom": "uom",
+            "cost": "cost",
+            "disp_cost_conv": "disp_cost_conv",
+            "display_cost_uom": "display_cost_uom",
+            "po_status": "po_status",
+            "canceled": "canceled",
+            "due_date": "due_date",
+            "expect_date": "expect_date",
+            "exp_rcpt_date": "exp_rcpt_date",
+            "exp_ship_date": "exp_ship_date",
+            "wo_id": "wo_id",
+            "created_date": "created_date",
+            "update_date": "update_date",
+        },
+    ),
+    ExtractorDefinition(
+        name="receiving_header",
+        source_table="dbo.receiving_header",
+        target_table="erp_mirror_receiving_header",
+        model=ERPMirrorReceivingHeader,
+        family=SyncFamily.OPERATIONAL,
+        cadence_seconds=5,
+        natural_keys=("system_id", "po_id", "receive_num"),
+        watermark_columns=("pro2modified", "update_date", "created_date"),
+        default_order_by=("system_id", "po_id", "receive_num"),
+        column_map={
+            "system_id": "system_id",
+            "po_id": "po_id",
+            "receive_num": "receive_num",
+            "receive_date": "receive_date",
+            "recv_status": "recv_status",
+            "packing_slip": "packing_slip",
+            "wms_user": "wms_user",
+            "wms_dispatch_id": "wms_dispatch_id",
+            "recv_comment": "recv_comment",
+            "created_date": "created_date",
+            "update_date": "update_date",
+        },
+    ),
+    ExtractorDefinition(
+        name="receiving_detail",
+        source_table="dbo.receiving_detail",
+        target_table="erp_mirror_receiving_detail",
+        model=ERPMirrorReceivingDetail,
+        family=SyncFamily.OPERATIONAL,
+        cadence_seconds=5,
+        natural_keys=("system_id", "receive_num", "po_id", "sequence"),
+        watermark_columns=("pro2modified", "update_date", "created_date"),
+        default_order_by=("system_id", "receive_num", "po_id", "sequence"),
+        column_map={
+            "system_id": "system_id",
+            "receive_num": "receive_num",
+            "po_id": "po_id",
+            "sequence": "sequence",
+            "item_ptr": "item_ptr",
+            "qty": "qty",
+            "uom_ptr": "uom_ptr",
+            "cost": "cost",
+            "recv_status": "recv_status",
+            "receive_date": "receive_date",
+            "display_cost_conv": "display_cost_conv",
+            "display_cost_uom": "display_cost_uom",
+            "created_date": "created_date",
+            "update_date": "update_date",
+        },
+    ),
+    ExtractorDefinition(
+        name="wo_header",
+        source_table="""
+            (
+                SELECT
+                    wo_id,
+                    source,
+                    source_id,
+                    source_seq,
+                    wo_status,
+                    department,
+                    wo_rule,
+                    pro2modified,
+                    update_date
+                FROM dbo.wo_header
+                WHERE NOT (
+                    ISNULL(canceled, 0) = 1
+                    AND COALESCE(created_date, order_date, update_date, pro2modified) < '2025-01-01'
+                )
+            ) wo_header_src
+        """,
+        target_table="erp_mirror_wo_header",
+        model=ERPMirrorWorkOrderHeader,
+        family=SyncFamily.OPERATIONAL,
+        cadence_seconds=5,
+        natural_keys=("wo_id",),
+        watermark_columns=("pro2modified", "update_date"),
+        default_order_by=("wo_id",),
+        column_map={
+            "wo_id": "wo_id",
+            "source": "source",
+            "source_id": "source_id",
+            "source_seq": "source_seq",
+            "wo_status": "wo_status",
+            "department": "department",
+            "wo_rule": "wo_rule",
+        },
+    ),
+    ExtractorDefinition(
+        name="pick_header",
+        source_table="""
+            (
+                SELECT system_id, pick_id, created_date, created_time, print_status, pro2modified, update_date
+                FROM (
+                    SELECT
+                        system_id,
+                        pick_id,
+                        created_date,
+                        created_time,
+                        print_status,
+                        pro2modified,
+                        update_date,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY system_id, pick_id
+                            ORDER BY COALESCE(pro2modified, update_date, created_date) DESC, created_time DESC
+                        ) AS rn
+                    FROM dbo.pick_header
+                ) ranked
+                WHERE rn = 1
+            ) pick_header_src
+        """,
+        target_table="erp_mirror_pick_header",
+        model=ERPMirrorPickHeader,
+        family=SyncFamily.OPERATIONAL,
+        cadence_seconds=5,
+        natural_keys=("pick_id", "system_id"),
+        watermark_columns=("pro2modified", "update_date", "created_date"),
+        default_order_by=("system_id", "pick_id"),
+        column_map={
+            "system_id": "system_id",
+            "pick_id": "pick_id",
+            "created_date": "created_date",
+            "created_time": "created_time",
+            "print_status": "print_status",
+        },
+    ),
+    ExtractorDefinition(
+        name="pick_detail",
+        source_table="""
+            (
+                SELECT system_id, pick_id, tran_type, tran_id, tran_seq, pro2modified, update_date, created_date
+                FROM (
+                    SELECT
+                        system_id,
+                        pick_id,
+                        tran_type,
+                        tran_id,
+                        tran_seq,
+                        pro2modified,
+                        update_date,
+                        created_date,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY system_id, pick_id, tran_type, tran_id, tran_seq
+                            ORDER BY COALESCE(pro2modified, update_date, created_date) DESC, pick_seq DESC
+                        ) AS rn
+                    FROM dbo.pick_detail
+                ) ranked
+                WHERE rn = 1
+            ) pick_detail_src
+        """,
+        target_table="erp_mirror_pick_detail",
+        model=ERPMirrorPickDetail,
+        family=SyncFamily.OPERATIONAL,
+        cadence_seconds=5,
+        natural_keys=("pick_id", "system_id", "tran_type", "tran_id", "sequence"),
+        watermark_columns=("pro2modified", "update_date", "created_date"),
+        default_order_by=("system_id", "pick_id", "tran_type", "tran_id", "tran_seq"),
+        column_map={
+            "system_id": "system_id",
+            "pick_id": "pick_id",
+            "tran_type": "tran_type",
+            "tran_id": "tran_id",
+            "tran_seq": "sequence",
         },
     ),
 ]
