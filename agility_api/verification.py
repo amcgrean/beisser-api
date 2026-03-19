@@ -7,7 +7,12 @@ from sqlalchemy import text
 
 from .database import engine
 from .sqlserver import connect_sqlserver
-from .sync_definitions import FIRST_SYNC_DEFINITIONS, ExtractorDefinition
+from .sync_definitions import (
+    FIRST_SYNC_DEFINITIONS,
+    ExtractorDefinition,
+    definitions_for_family,
+    definitions_for_names,
+)
 
 
 @dataclass(slots=True)
@@ -97,3 +102,11 @@ def definition_by_name(name: str) -> ExtractorDefinition:
         if definition.name == name:
             return definition
     raise KeyError(f"Unknown definition: {name}")
+
+
+def definitions_by_selector(names: list[str] | None = None, family: str | None = None) -> list[ExtractorDefinition]:
+    if names:
+        return definitions_for_names(names)
+    if family:
+        return definitions_for_family(family)
+    return FIRST_SYNC_DEFINITIONS

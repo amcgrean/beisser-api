@@ -22,6 +22,11 @@ def env_int(name: str, default: int) -> int:
         return default
 
 
+def env_csv(name: str, default: str) -> list[str]:
+    raw = os.getenv(name, default)
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
 def build_database_url() -> str:
     direct = os.getenv("DATABASE_URL") or os.getenv("POSTGRES_DSN") or os.getenv("TOOLBX_POSTGRES_DSN")
     if direct:
@@ -59,9 +64,19 @@ class Settings:
     operational_history_years: int = env_int("SYNC_OPERATIONAL_HISTORY_YEARS", 5)
     batch_size: int = env_int("SYNC_BATCH_SIZE", 1000)
     merge_batch_size: int = env_int("SYNC_MERGE_BATCH_SIZE", 50000)
+    heavy_merge_batch_size: int = env_int("SYNC_HEAVY_MERGE_BATCH_SIZE", 10000)
+    heavy_merge_row_threshold: int = env_int("SYNC_HEAVY_MERGE_ROW_THRESHOLD", 250000)
+    heavy_merge_tables: list[str] = None  # type: ignore[assignment]
     staging_schema: str = os.getenv("MIRROR_STAGING_SCHEMA", "public")
     log_level: str = os.getenv("LOG_LEVEL", "INFO").upper()
     log_dir: str = os.getenv("LOG_DIR", str(ROOT / "logs"))
+
+    def __post_init__(self):
+        if self.heavy_merge_tables is None:
+            self.heavy_merge_tables = env_csv(
+                "SYNC_HEAVY_MERGE_TABLES",
+                "item_branch,so_detail,shipments_detail,po_detail,receiving_detail",
+            )
 
 
 def get_settings() -> Settings:

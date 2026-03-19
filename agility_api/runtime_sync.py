@@ -90,7 +90,11 @@ class PostgresMirrorWriter:
     def __init__(self, logger, write_batch_size: int):
         self.logger = logger
         self.write_batch_size = write_batch_size
-        self.merge_batch_size = get_settings().merge_batch_size
+        settings = get_settings()
+        self.merge_batch_size = settings.merge_batch_size
+        self.heavy_merge_batch_size = settings.heavy_merge_batch_size
+        self.heavy_merge_row_threshold = settings.heavy_merge_row_threshold
+        self.heavy_merge_tables = set(settings.heavy_merge_tables)
 
     def bootstrap(self) -> None:
         if engine is None:
@@ -107,6 +111,7 @@ class PostgresMirrorWriter:
             return 0
 
         total_written = 0
+        merge_batch_size = self._merge_batch_size_for(definition, len(rows))
         temp_table = f"tmp_{definition.target_table}_{uuid4().hex[:8]}"
         first_prepared = self._prepare_row(definition, rows[0], batch_id)
         columns = list(first_prepared.keys())
@@ -145,7 +150,7 @@ class PostgresMirrorWriter:
                     merge_sql = (
                         f"WITH moved AS ("
                         f" DELETE FROM {temp_table}"
-                        f" WHERE ctid IN (SELECT ctid FROM {temp_table} LIMIT {self.merge_batch_size})"
+                        f" WHERE ctid IN (SELECT ctid FROM {temp_table} LIMIT {merge_batch_size})"
                         f" RETURNING {', '.join(columns)}"
                         f" ) "
                         f"INSERT INTO {definition.target_table} ({', '.join(columns)}) "
@@ -175,6 +180,26 @@ class PostgresMirrorWriter:
 
         self.logger.info("[%s] merged staged rows into %s", definition.name, definition.target_table)
         return total_written
+
+    def count_target_rows(self, definition: ExtractorDefinition) -> int:
+        with engine.connect() as conn:
+            return conn.execute(text(f"SELECT COUNT(*) FROM {definition.target_table}")).scalar_one()
+
+    def _merge_batch_size_for(self, definition: ExtractorDefinition, row_count: int) -> int:
+        if (
+            definition.name in self.heavy_merge_tables
+            or row_count >= self.heavy_merge_row_threshold
+        ):
+            if self.heavy_merge_batch_size < self.merge_batch_size:
+                self.logger.info(
+                    "[%s] using reduced merge batch size %s (default=%s, source_rows=%s)",
+                    definition.name,
+                    self.heavy_merge_batch_size,
+                    self.merge_batch_size,
+                    row_count,
+                )
+                return self.heavy_merge_batch_size
+        return self.merge_batch_size
 
     def _prepare_row(self, definition: ExtractorDefinition, row: dict[str, Any], batch_id: str) -> dict[str, Any]:
         payload = {key: value for key, value in row.items() if not key.startswith("__wm_")}
@@ -255,9 +280,10 @@ class SyncRuntime:
                 total_rows += merged
                 with self.session() as session:
                     table_state = self._get_or_create_table_state(session, definition)
+                    target_row_count = self.writer.count_target_rows(definition)
                     table_state.last_batch_id = batch_id
                     table_state.last_status = "success"
-                    table_state.last_row_count = merged
+                    table_state.last_row_count = target_row_count
                     table_state.last_duration_ms = int((utcnow() - started_table).total_seconds() * 1000)
                     table_state.last_success_at = utcnow()
                     table_state.last_error = None
@@ -267,9 +293,10 @@ class SyncRuntime:
                     session.add(table_state)
                     session.commit()
                     self.logger.info(
-                        "[%s] sync complete: merged=%s duration_ms=%s new_watermark=%s",
+                        "[%s] sync complete: merged=%s row_count=%s duration_ms=%s new_watermark=%s",
                         definition.name,
                         merged,
+                        target_row_count,
                         table_state.last_duration_ms,
                         table_state.last_source_updated_at,
                     )
