@@ -330,48 +330,64 @@ class ShipToGeocoder:
 
         try:
             with open_func(geo_path, "rt", encoding="utf-8") as handle:
-                raw_text = handle.read()
+                for feature in self._iter_geojson_features(handle):
+                    coords = feature.get("geometry", {}).get("coordinates", [])
+                    if not isinstance(coords, Sequence) or len(coords) < 2:
+                        continue
+                    lon, lat = coords[0], coords[1]
+                    if lat is None or lon is None:
+                        continue
 
-            for feature in self._iter_geojson_features(raw_text):
-                coords = feature.get("geometry", {}).get("coordinates", [])
-                if not isinstance(coords, Sequence) or len(coords) < 2:
-                    continue
-                lon, lat = coords[0], coords[1]
-                if lat is None or lon is None:
-                    continue
+                    props = {str(k).lower(): v for k, v in (feature.get("properties") or {}).items()}
+                    normalized = {
+                        "address_1": props.get("address_1") or props.get("address") or props.get("street"),
+                        "city": props.get("city"),
+                        "state": props.get("state"),
+                        "zip": props.get("zip") or props.get("postal_code"),
+                        "lat": float(lat),
+                        "lon": float(lon),
+                    }
 
-                props = {str(k).lower(): v for k, v in (feature.get("properties") or {}).items()}
-                normalized = {
-                    "address_1": props.get("address_1") or props.get("address") or props.get("street"),
-                    "city": props.get("city"),
-                    "state": props.get("state"),
-                    "zip": props.get("zip") or props.get("postal_code"),
-                    "lat": float(lat),
-                    "lon": float(lon),
-                }
+                    address_key = build_address_key(normalized)
+                    if address_key and address_key not in self.by_exact:
+                        self.by_exact[address_key] = normalized
 
-                address_key = build_address_key(normalized)
-                if address_key and address_key not in self.by_exact:
-                    self.by_exact[address_key] = normalized
+                    zip_key = normalize_zip(normalized.get("zip"))
+                    city_state_key = "|".join(
+                        [normalize_text(normalized.get("city")), normalize_text(normalized.get("state"))]
+                    )
 
-                zip_key = normalize_zip(normalized.get("zip"))
-                city_state_key = "|".join(
-                    [normalize_text(normalized.get("city")), normalize_text(normalized.get("state"))]
-                )
+                    if zip_key:
+                        self.by_zip.setdefault(zip_key, []).append(normalized)
+                    if city_state_key != "|":
+                        self.by_city_state.setdefault(city_state_key, []).append(normalized)
 
-                if zip_key:
-                    self.by_zip.setdefault(zip_key, []).append(normalized)
-                if city_state_key != "|":
-                    self.by_city_state.setdefault(city_state_key, []).append(normalized)
-
-                loaded += 1
+                    loaded += 1
 
             log.info("Loaded %s geojson address candidates from %s", loaded, geo_path)
         except Exception as exc:
             log.warning("Failed to parse geojson file %s: %s", geo_path, exc)
 
-    def _iter_geojson_features(self, payload: str) -> Iterable[dict]:
-        parsed = json.loads(payload)
+    def _iter_geojson_features(self, handle) -> Iterable[dict]:
+        try:
+            parsed = json.load(handle)
+        except Exception:
+            try:
+                handle.seek(0)
+            except Exception:
+                return
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    item = json.loads(line)
+                except Exception:
+                    continue
+                if isinstance(item, dict):
+                    yield item
+            return
+
         if isinstance(parsed, dict):
             features = parsed.get("features")
             if isinstance(features, list):
@@ -382,22 +398,11 @@ class ShipToGeocoder:
             if parsed.get("type") == "Feature":
                 yield parsed
                 return
-        elif isinstance(parsed, list):
+        if isinstance(parsed, list):
             for feature in parsed:
                 if isinstance(feature, dict):
                     yield feature
             return
-
-        for line in payload.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                item = json.loads(line)
-            except Exception:
-                continue
-            if isinstance(item, dict):
-                yield item
 
     def _fuzzy_match(self, target: dict, candidates: Iterable[dict]) -> Optional[dict]:
         target_house, target_street = split_house_and_street(target.get("address_1"))
@@ -449,7 +454,6 @@ class ShipToGeocoder:
                     time.sleep(wait_for)
             request = Request(url, headers={"User-Agent": self.nominatim_user_agent})
             response = urlopen(request, timeout=10)
-            self._last_nominatim_request_ts = time.monotonic()
             payload = response.read().decode("utf-8")
             data = json.loads(payload)
             if not data:
@@ -459,6 +463,8 @@ class ShipToGeocoder:
         except Exception as exc:
             log.warning("Nominatim geocode failed for '%s': %s", query, exc)
             return None, None, "failed"
+        finally:
+            self._last_nominatim_request_ts = time.monotonic()
 
     def geocode(self, row: dict) -> Tuple[Optional[float], Optional[float], str]:
         if not self.enabled:
@@ -732,6 +738,23 @@ def sync_customer_shipto(src_cur, cld_cur, config: dict, state: dict, geocoder: 
         return 0
 
     source_columns = [col[0] for col in src_cur.description]
+    source_columns_lower = {str(c).lower() for c in source_columns}
+    if "prowid" not in source_columns_lower:
+        log.error("[%s] Source query must include prowid for incremental sync.", name)
+        return 0
+    if not source_columns_lower.intersection({"cust_key", "customer_key", "cust"}):
+        log.error(
+            "[%s] Source query is missing customer key column (expected one of cust_key/customer_key/cust).",
+            name,
+        )
+        return 0
+    if not source_columns_lower.intersection({"seq_num", "seq", "shipto_seq"}):
+        log.error(
+            "[%s] Source query is missing ship-to sequence column (expected one of seq_num/seq/shipto_seq).",
+            name,
+        )
+        return 0
+
     transformed: List[dict] = []
     new_watermark = last_val
     for row in rows:
