@@ -41,6 +41,7 @@ Ship-to geocoding settings:
 - `SHIPTO_GEOCODE_REQUIRE_MISSING_ONLY` (default `true`)
 - `SHIPTO_GEOCODE_RETRY_FAILED` (default `false`)
 - `SHIPTO_GEOCODE_NOMINATIM_USER_AGENT` (default `beisser-api-sync/1.0`)
+- `SHIPTO_GEOCODE_NOMINATIM_MIN_INTERVAL_SECONDS` (default `1.1`; minimum delay between fallback calls)
 
 ## Install
 
@@ -97,4 +98,4 @@ Geocoding behavior:
 
 - Replace placeholder queries/stored procedure names in `TABLE_CONFIGS` with production SQL.
 - Confirm `prowid`/`updated_at` behavior for each table during the data gap audit.
-- Confirm source table/column names for `CustomerShipTo` in your Agility SQL Server schema and adjust query aliases if needed.
+- Confirm `CustomerShipTo` table name in your Agility SQL Server schema (query uses `SELECT *` with transform-side alias handling).
