@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import time
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -97,6 +98,9 @@ SHIPTO_GEOCODE_SETTINGS = {
     "nominatim_user_agent": os.getenv(
         "SHIPTO_GEOCODE_NOMINATIM_USER_AGENT", "beisser-api-sync/1.0"
     ),
+    "nominatim_min_interval_seconds": max(
+        0.0, float(os.getenv("SHIPTO_GEOCODE_NOMINATIM_MIN_INTERVAL_SECONDS", "1.1"))
+    ),
 }
 
 
@@ -172,20 +176,7 @@ TABLE_CONFIGS = [
         "name": "customer_shipto",
         "cloud_table": "erp_mirror_cust_shipto",
         "source_query": """
-            SELECT
-                prowid,
-                updated_at,
-                cust_key,
-                seq_num,
-                shipto_name,
-                address_1,
-                address_2,
-                city,
-                state,
-                zip,
-                attention,
-                phone,
-                branch_code
+            SELECT *
             FROM CustomerShipTo
             WHERE prowid > {last_prowid}
         """,
@@ -313,6 +304,8 @@ class ShipToGeocoder:
         self.enabled = settings["enabled"]
         self.fallback_nominatim = settings["fallback_nominatim"]
         self.nominatim_user_agent = settings["nominatim_user_agent"]
+        self.nominatim_min_interval_seconds = settings["nominatim_min_interval_seconds"]
+        self._last_nominatim_request_ts = 0.0
 
         self.by_exact: Dict[str, dict] = {}
         self.by_zip: Dict[str, List[dict]] = {}
@@ -337,9 +330,9 @@ class ShipToGeocoder:
 
         try:
             with open_func(geo_path, "rt", encoding="utf-8") as handle:
-                data = json.load(handle)
+                raw_text = handle.read()
 
-            for feature in data.get("features", []):
+            for feature in self._iter_geojson_features(raw_text):
                 coords = feature.get("geometry", {}).get("coordinates", [])
                 if not isinstance(coords, Sequence) or len(coords) < 2:
                     continue
@@ -376,6 +369,35 @@ class ShipToGeocoder:
             log.info("Loaded %s geojson address candidates from %s", loaded, geo_path)
         except Exception as exc:
             log.warning("Failed to parse geojson file %s: %s", geo_path, exc)
+
+    def _iter_geojson_features(self, payload: str) -> Iterable[dict]:
+        parsed = json.loads(payload)
+        if isinstance(parsed, dict):
+            features = parsed.get("features")
+            if isinstance(features, list):
+                for feature in features:
+                    if isinstance(feature, dict):
+                        yield feature
+                return
+            if parsed.get("type") == "Feature":
+                yield parsed
+                return
+        elif isinstance(parsed, list):
+            for feature in parsed:
+                if isinstance(feature, dict):
+                    yield feature
+            return
+
+        for line in payload.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                item = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(item, dict):
+                yield item
 
     def _fuzzy_match(self, target: dict, candidates: Iterable[dict]) -> Optional[dict]:
         target_house, target_street = split_house_and_street(target.get("address_1"))
@@ -420,8 +442,14 @@ class ShipToGeocoder:
         url = f"https://nominatim.openstreetmap.org/search?{params}"
 
         try:
+            if self.nominatim_min_interval_seconds > 0:
+                elapsed = time.monotonic() - self._last_nominatim_request_ts
+                wait_for = self.nominatim_min_interval_seconds - elapsed
+                if wait_for > 0:
+                    time.sleep(wait_for)
             request = Request(url, headers={"User-Agent": self.nominatim_user_agent})
             response = urlopen(request, timeout=10)
+            self._last_nominatim_request_ts = time.monotonic()
             payload = response.read().decode("utf-8")
             data = json.loads(payload)
             if not data:
@@ -536,7 +564,7 @@ def ensure_shipto_schema(cld_cur) -> None:
         """
         CREATE TABLE IF NOT EXISTS erp_mirror_cust_shipto (
             cust_key VARCHAR(64) NOT NULL,
-            seq_num INTEGER NOT NULL,
+            seq_num VARCHAR(64) NOT NULL,
             shipto_name TEXT,
             address_1 TEXT,
             address_2 TEXT,
@@ -557,6 +585,23 @@ def ensure_shipto_schema(cld_cur) -> None:
         )
         """
     )
+    cld_cur.execute(
+        """
+        SELECT data_type
+        FROM information_schema.columns
+        WHERE table_name = 'erp_mirror_cust_shipto' AND column_name = 'seq_num'
+        """
+    )
+    seq_type_row = cld_cur.fetchone()
+    seq_type = (seq_type_row[0] if seq_type_row else "").lower()
+    if seq_type in {"smallint", "integer", "bigint", "numeric", "decimal"}:
+        log.warning(
+            "Migrating erp_mirror_cust_shipto.seq_num from %s to VARCHAR(64) for compatibility.",
+            seq_type,
+        )
+        cld_cur.execute(
+            "ALTER TABLE erp_mirror_cust_shipto ALTER COLUMN seq_num TYPE VARCHAR(64) USING seq_num::text"
+        )
     cld_cur.execute("ALTER TABLE erp_mirror_cust_shipto ADD COLUMN IF NOT EXISTS lat NUMERIC(9,6)")
     cld_cur.execute("ALTER TABLE erp_mirror_cust_shipto ADD COLUMN IF NOT EXISTS lon NUMERIC(9,6)")
     cld_cur.execute(
@@ -582,10 +627,7 @@ def _source_value(row: dict, *keys: str):
 def transform_shipto_row(src_row: dict) -> dict:
     row = _as_lower_dict(src_row)
     seq_raw = _source_value(row, "seq_num", "seq", "shipto_seq")
-    try:
-        seq_num = int(seq_raw)
-    except (TypeError, ValueError):
-        seq_num = 0
+    seq_num = str(seq_raw or "").strip()
 
     return {
         "cust_key": str(_source_value(row, "cust_key", "customer_key", "cust") or "").strip(),
@@ -612,7 +654,7 @@ def addresses_equal(current: dict, existing: dict) -> bool:
     return True
 
 
-def fetch_existing_shipto_rows(cld_cur, keys: List[Tuple[str, int]]) -> dict:
+def fetch_existing_shipto_rows(cld_cur, keys: List[Tuple[str, str]]) -> dict:
     if not keys:
         return {}
 
@@ -644,7 +686,7 @@ def fetch_existing_shipto_rows(cld_cur, keys: List[Tuple[str, int]]) -> dict:
     mapped = {}
     for row in rows:
         row_dict = dict(zip(columns, row))
-        mapped[(str(row_dict["cust_key"]), int(row_dict["seq_num"]))] = row_dict
+        mapped[(str(row_dict["cust_key"]), str(row_dict["seq_num"]))] = row_dict
     return mapped
 
 
@@ -753,6 +795,9 @@ def sync_customer_shipto(src_cur, cld_cur, config: dict, state: dict, geocoder: 
     for idx, row in enumerate(transformed, start=1):
         if not row["cust_key"]:
             log.warning("[%s] Skipping row with missing cust_key (source_prowid=%s)", name, row["source_prowid"])
+            continue
+        if not row["seq_num"]:
+            log.warning("[%s] Skipping row with missing seq_num (cust_key=%s)", name, row["cust_key"])
             continue
 
         key = (row["cust_key"], row["seq_num"])
