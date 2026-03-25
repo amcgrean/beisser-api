@@ -107,73 +107,28 @@ SHIPTO_GEOCODE_SETTINGS = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Tables synced by the main ERP sync worker (Vercel) into erp_mirror_* tables.
+# These are DISABLED here to avoid duplication.  The flat tables (customers,
+# dispatch_orders, inventory, sales_orders, sales_order_lines, etc.) on
+# Supabase were originally populated by this script but the data now lives
+# in the erp_mirror_* tables and should be consumed from there by po-app,
+# wh-tracker, and other front-end apps.
+# ---------------------------------------------------------------------------
+_DISABLED_TABLES = [
+    "dispatch_orders",   # → erp_mirror_shipments_header
+    "dispatch_routes",   # → no direct equivalent
+    "tag_print_queue",   # → erp_mirror_print_transaction
+    "sales_orders",      # → erp_mirror_so_header
+    "sales_order_lines", # → erp_mirror_so_detail
+    "customers",         # → erp_mirror_cust
+    "inventory",         # → erp_mirror_item
+    "inventory_alerts",  # → table does not exist in Agility
+    "receiving_checkin", # → erp_mirror_receiving_header
+    "purchase_orders",   # → erp_mirror_po_header
+]
+
 TABLE_CONFIGS = [
-    {
-        "name": "dispatch_orders",
-        "cloud_table": "dispatch_orders",
-        "source_query": """
-            SELECT * FROM dbo.dispatch_orders
-            WHERE prowid > {last_prowid}
-        """,
-        "pk": "prowid",
-        "watermark_col": "prowid",
-        "use_prowid": True,
-    },
-    {
-        "name": "dispatch_routes",
-        "cloud_table": "dispatch_routes",
-        "source_query": """
-            SELECT * FROM dbo.routes
-            WHERE prowid > {last_prowid}
-        """,
-        "pk": "prowid",
-        "watermark_col": "prowid",
-        "use_prowid": True,
-    },
-    {
-        "name": "tag_print_queue",
-        "cloud_table": "tag_print_queue",
-        "source_query": """
-            SELECT * FROM dbo.tag_print_queue
-            WHERE prowid > {last_prowid}
-        """,
-        "pk": "prowid",
-        "watermark_col": "prowid",
-        "use_prowid": True,
-    },
-    {
-        "name": "sales_orders",
-        "cloud_table": "sales_orders",
-        "source_query": """
-            SELECT * FROM dbo.so_header
-            WHERE prowid > {last_prowid}
-        """,
-        "pk": "prowid",
-        "watermark_col": "prowid",
-        "use_prowid": True,
-    },
-    {
-        "name": "sales_order_lines",
-        "cloud_table": "sales_order_lines",
-        "source_query": """
-            SELECT * FROM dbo.so_detail
-            WHERE prowid > {last_prowid}
-        """,
-        "pk": "prowid",
-        "watermark_col": "prowid",
-        "use_prowid": True,
-    },
-    {
-        "name": "customers",
-        "cloud_table": "customers",
-        "source_query": """
-            SELECT * FROM dbo.cust
-            WHERE prowid > {last_prowid}
-        """,
-        "pk": "prowid",
-        "watermark_col": "prowid",
-        "use_prowid": True,
-    },
     {
         "name": "customer_shipto",
         "cloud_table": "erp_mirror_cust_shipto",
@@ -187,61 +142,11 @@ TABLE_CONFIGS = [
         "use_prowid": False,
         "custom_sync": "customer_shipto",
     },
-    {
-        "name": "customer_ar",
-        "cloud_table": "customer_ar",
-        "source_query": """
-            SELECT * FROM dbo.customer_ar
-            WHERE updated_at > '{last_updated}'
-        """,
-        "pk": "prowid",
-        "watermark_col": "updated_at",
-        "use_prowid": False,
-    },
-    {
-        "name": "inventory",
-        "cloud_table": "inventory",
-        "source_query": """
-            SELECT * FROM dbo.item
-            WHERE prowid > {last_prowid}
-        """,
-        "pk": "prowid",
-        "watermark_col": "prowid",
-        "use_prowid": True,
-    },
-    {
-        "name": "inventory_alerts",
-        "cloud_table": "inventory_alerts",
-        "source_query": """
-            SELECT * FROM dbo.inventory_alerts
-            WHERE prowid > {last_prowid}
-        """,
-        "pk": "prowid",
-        "watermark_col": "prowid",
-        "use_prowid": True,
-    },
-    {
-        "name": "receiving_checkin",
-        "cloud_table": "receiving_checkin",
-        "source_query": """
-            SELECT * FROM dbo.receiving_checkin
-            WHERE prowid > {last_prowid}
-        """,
-        "pk": "prowid",
-        "watermark_col": "prowid",
-        "use_prowid": True,
-    },
-    {
-        "name": "purchase_orders",
-        "cloud_table": "purchase_orders",
-        "source_query": """
-            SELECT * FROM dbo.po_header
-            WHERE prowid > {last_prowid}
-        """,
-        "pk": "prowid",
-        "watermark_col": "prowid",
-        "use_prowid": True,
-    },
+    # customer_ar / erp_mirror_aropen: disabled pending migration to the main
+    # ERP sync worker.  The erp_mirror_aropen table uses a composite unique key
+    # (system_id, ref_num, ref_num_seq) plus required columns (synced_at,
+    # is_deleted, sync_batch_id) that the simple sync_table() cannot populate.
+    # Source table is dbo.aropen with watermark column update_date.
 ]
 
 
@@ -555,10 +460,13 @@ def sync_table(src_cur, cld_cur, config: dict, state: dict) -> int:
 
             if use_prowid and row_dict.get("prowid", 0) > new_watermark:
                 new_watermark = row_dict["prowid"]
-            elif not use_prowid and row_dict.get("updated_at"):
-                updated_str = str(row_dict["updated_at"])
-                if updated_str > str(new_watermark):
-                    new_watermark = updated_str
+            elif not use_prowid:
+                wm_col = config.get("watermark_col", "update_date")
+                wm_val = row_dict.get(wm_col) or row_dict.get("update_date")
+                if wm_val is not None:
+                    wm_str = str(wm_val)
+                    if wm_str > str(new_watermark):
+                        new_watermark = wm_str
 
         except Exception as e:
             row_key = ":".join(str(row_dict.get(pk)) for pk in pk_columns)
@@ -575,31 +483,11 @@ def sync_table(src_cur, cld_cur, config: dict, state: dict) -> int:
 
 
 def ensure_shipto_schema(cld_cur) -> None:
-    cld_cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS erp_mirror_cust_shipto (
-            cust_key VARCHAR(64) NOT NULL,
-            seq_num VARCHAR(64) NOT NULL,
-            shipto_name TEXT,
-            address_1 TEXT,
-            address_2 TEXT,
-            city TEXT,
-            state VARCHAR(16),
-            zip VARCHAR(16),
-            attention TEXT,
-            phone TEXT,
-            branch_code VARCHAR(32),
-            lat NUMERIC(9,6),
-            lon NUMERIC(9,6),
-            geocoded_at TIMESTAMP,
-            geocode_source VARCHAR(64),
-            source_prowid BIGINT,
-            source_updated_at TIMESTAMP,
-            last_synced_at TIMESTAMP NOT NULL DEFAULT NOW(),
-            PRIMARY KEY (cust_key, seq_num)
-        )
-        """
-    )
+    """Ensure geocoding columns exist on the erp_mirror_cust_shipto table.
+
+    The table itself is created and maintained by the main ERP sync worker.
+    This function only adds the geocoding-specific columns if missing.
+    """
     cld_cur.execute("ALTER TABLE erp_mirror_cust_shipto ADD COLUMN IF NOT EXISTS lat NUMERIC(9,6)")
     cld_cur.execute("ALTER TABLE erp_mirror_cust_shipto ADD COLUMN IF NOT EXISTS lon NUMERIC(9,6)")
     cld_cur.execute(
@@ -640,7 +528,7 @@ def transform_shipto_row(src_row: dict) -> dict:
         "phone": _source_value(row, "phone"),
         "branch_code": _source_value(row, "branch_code", "branch"),
         "source_prowid": _source_value(row, "prowid"),
-        "source_updated_at": _source_value(row, "updated_at"),
+        "source_updated_at": _source_value(row, "update_date", "updated_at"),
     }
 
 
@@ -656,7 +544,7 @@ def fetch_existing_shipto_rows(cld_cur, keys: List[Tuple[str, str]]) -> dict:
     if not keys:
         return {}
 
-    placeholders = ",".join(["(%s,%s)"] * len(keys))
+    placeholders = ",".join(["(%s,%s::integer)"] * len(keys))
     params: List[object] = []
     for cust_key, seq_num in keys:
         params.extend([cust_key, seq_num])
@@ -664,7 +552,7 @@ def fetch_existing_shipto_rows(cld_cur, keys: List[Tuple[str, str]]) -> dict:
     query = f"""
         SELECT
             cust_key,
-            seq_num,
+            seq_num::text AS seq_num,
             address_1,
             address_2,
             city,
@@ -777,43 +665,15 @@ def sync_customer_shipto(src_cur, cld_cur, config: dict, state: dict, geocoder: 
     geocode_success = 0
     geocode_failed = 0
 
-    upsert_columns = [
-        "cust_key",
-        "seq_num",
-        "shipto_name",
-        "address_1",
-        "address_2",
-        "city",
-        "state",
-        "zip",
-        "attention",
-        "phone",
-        "branch_code",
-        "lat",
-        "lon",
-        "geocoded_at",
-        "geocode_source",
-        "source_prowid",
-        "source_updated_at",
-        "last_synced_at",
-    ]
-
-    update_columns = [c for c in upsert_columns if c not in {"cust_key", "seq_num"}]
-
-    insert_stmt = sql.SQL(
+    # The erp_mirror_cust_shipto table is owned by the main ERP sync worker.
+    # Its unique constraint is (system_id, cust_key, seq_num).
+    # We UPDATE geocoding columns on rows that already exist.
+    geocode_update_stmt = sql.SQL(
         """
-        INSERT INTO erp_mirror_cust_shipto ({columns})
-        VALUES ({values})
-        ON CONFLICT (cust_key, seq_num)
-        DO UPDATE SET {updates}
+        UPDATE erp_mirror_cust_shipto
+        SET lat = %s, lon = %s, geocoded_at = %s, geocode_source = %s
+        WHERE cust_key = %s AND seq_num = %s::text
         """
-    ).format(
-        columns=sql.SQL(", ").join(sql.Identifier(c) for c in upsert_columns),
-        values=sql.SQL(", ").join(sql.Placeholder() for _ in upsert_columns),
-        updates=sql.SQL(", ").join(
-            sql.SQL("{} = EXCLUDED.{}").format(sql.Identifier(c), sql.Identifier(c))
-            for c in update_columns
-        ),
     )
 
     now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -848,13 +708,17 @@ def sync_customer_shipto(src_cur, cld_cur, config: dict, state: dict, geocoder: 
             row["geocoded_at"] = existing.get("geocoded_at") if existing else None
             row["geocode_source"] = existing.get("geocode_source") if existing else None
 
-        row["last_synced_at"] = now_utc
-
         try:
-            cld_cur.execute(insert_stmt, [row.get(c) for c in upsert_columns])
-            row_count += 1
+            cld_cur.execute(geocode_update_stmt, [
+                row["lat"], row["lon"], row["geocoded_at"], row["geocode_source"],
+                row["cust_key"], row["seq_num"],
+            ])
+            if cld_cur.rowcount > 0:
+                row_count += 1
+            else:
+                log.debug("[%s] No matching row for key=%s:%s (not yet synced by ERP worker?)", name, row["cust_key"], row["seq_num"])
         except Exception as exc:
-            log.warning("[%s] Upsert failed for key=%s:%s: %s", name, row["cust_key"], row["seq_num"], exc)
+            log.warning("[%s] Update failed for key=%s:%s: %s", name, row["cust_key"], row["seq_num"], exc)
 
         if idx % batch_size == 0:
             cld_cur.connection.commit()
