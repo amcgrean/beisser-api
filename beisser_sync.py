@@ -678,7 +678,7 @@ def sync_customer_shipto(src_cur, cld_cur, config: dict, state: dict, geocoder: 
         """
         UPDATE erp_mirror_cust_shipto
         SET lat = %s, lon = %s, geocoded_at = %s, geocode_source = %s
-        WHERE cust_key = %s AND seq_num = %s::text
+        WHERE cust_key = %s AND seq_num = %s::integer
         """
     )
 
@@ -725,6 +725,7 @@ def sync_customer_shipto(src_cur, cld_cur, config: dict, state: dict, geocoder: 
                 log.debug("[%s] No matching row for key=%s:%s (not yet synced by ERP worker?)", name, row["cust_key"], row["seq_num"])
         except Exception as exc:
             log.warning("[%s] Update failed for key=%s:%s: %s", name, row["cust_key"], row["seq_num"], exc)
+            cld_cur.connection.rollback()
 
         if idx % batch_size == 0:
             cld_cur.connection.commit()
