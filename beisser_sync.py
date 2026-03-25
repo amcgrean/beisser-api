@@ -246,11 +246,19 @@ class ShipToGeocoder:
                         continue
 
                     props = {str(k).lower(): v for k, v in (feature.get("properties") or {}).items()}
+
+                    # Build full street address from number + street if needed
+                    addr = props.get("address_1") or props.get("address")
+                    if not addr:
+                        street = props.get("street", "")
+                        number = props.get("number", "")
+                        addr = f"{number} {street}".strip() if number else street
+
                     normalized = {
-                        "address_1": props.get("address_1") or props.get("address") or props.get("street"),
+                        "address_1": addr,
                         "city": props.get("city"),
-                        "state": props.get("state"),
-                        "zip": props.get("zip") or props.get("postal_code"),
+                        "state": props.get("state") or props.get("region"),
+                        "zip": props.get("zip") or props.get("postal_code") or props.get("postcode"),
                         "lat": float(lat),
                         "lon": float(lon),
                     }
