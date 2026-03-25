@@ -540,39 +540,45 @@ def addresses_equal(current: dict, existing: dict) -> bool:
     return True
 
 
+_FETCH_BATCH_SIZE = 500  # max keys per IN-clause to avoid stack depth limits
+
+
 def fetch_existing_shipto_rows(cld_cur, keys: List[Tuple[str, str]]) -> dict:
     if not keys:
         return {}
 
-    placeholders = ",".join(["(%s,%s::integer)"] * len(keys))
-    params: List[object] = []
-    for cust_key, seq_num in keys:
-        params.extend([cust_key, seq_num])
-
-    query = f"""
-        SELECT
-            cust_key,
-            seq_num::text AS seq_num,
-            address_1,
-            address_2,
-            city,
-            state,
-            zip,
-            lat,
-            lon,
-            geocode_source,
-            geocoded_at
-        FROM erp_mirror_cust_shipto
-        WHERE (cust_key, seq_num) IN ({placeholders})
-    """
-
-    cld_cur.execute(query, params)
-    rows = cld_cur.fetchall()
-    columns = [col[0] for col in cld_cur.description]
     mapped = {}
-    for row in rows:
-        row_dict = dict(zip(columns, row))
-        mapped[(str(row_dict["cust_key"]), str(row_dict["seq_num"]))] = row_dict
+    for batch_start in range(0, len(keys), _FETCH_BATCH_SIZE):
+        batch = keys[batch_start : batch_start + _FETCH_BATCH_SIZE]
+        placeholders = ",".join(["(%s,%s::integer)"] * len(batch))
+        params: List[object] = []
+        for cust_key, seq_num in batch:
+            params.extend([cust_key, seq_num])
+
+        query = f"""
+            SELECT
+                cust_key,
+                seq_num::text AS seq_num,
+                address_1,
+                address_2,
+                city,
+                state,
+                zip,
+                lat,
+                lon,
+                geocode_source,
+                geocoded_at
+            FROM erp_mirror_cust_shipto
+            WHERE (cust_key, seq_num) IN ({placeholders})
+        """
+
+        cld_cur.execute(query, params)
+        rows = cld_cur.fetchall()
+        columns = [col[0] for col in cld_cur.description]
+        for row in rows:
+            row_dict = dict(zip(columns, row))
+            mapped[(str(row_dict["cust_key"]), str(row_dict["seq_num"]))] = row_dict
+
     return mapped
 
 
