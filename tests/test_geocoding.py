@@ -17,10 +17,13 @@ from unittest.mock import MagicMock, patch
 # Make the project root importable when running from the repo root
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# Stub out DB drivers that are only available on the Pi so tests can run anywhere.
-for _mod in ("psycopg2", "psycopg2.sql", "pyodbc"):
+# Stub out DB drivers and dotenv that are only available on the Pi so tests can run anywhere.
+for _mod in ("psycopg2", "psycopg2.sql", "pyodbc", "dotenv"):
     if _mod not in sys.modules:
-        sys.modules[_mod] = types.ModuleType(_mod)
+        _stub = types.ModuleType(_mod)
+        if _mod == "dotenv":
+            _stub.load_dotenv = lambda *a, **kw: None  # type: ignore[attr-defined]
+        sys.modules[_mod] = _stub
 # psycopg2.sql needs the `sql` attribute on the psycopg2 stub
 sys.modules["psycopg2"].sql = sys.modules["psycopg2.sql"]  # type: ignore[attr-defined]
 
@@ -521,6 +524,40 @@ class TestShipToGeocoderNDGeoJson(unittest.TestCase):
             lat, lon, source = geocoder.geocode(row)
             self.assertIsNotNone(lat)
             self.assertEqual(source, "local_geojson_exact")
+        finally:
+            os.unlink(tmp_name)
+
+    def test_ndjson_with_embedded_newlines(self):
+        """Features containing embedded newlines in property values should still parse."""
+        feature1 = {
+            "type": "Feature",
+            "geometry": {"type": "Point", "coordinates": [-84.1, 40.7]},
+            "properties": {
+                "address_1": "100 Main St",
+                "city": "Lima",
+                "state": "OH",
+                "zip": "45801",
+                "notes": "Line one\nLine two",
+            },
+        }
+        feature2 = _make_feature("200 Elm Ave", "Findlay", "OH", "45840", 41.04, -83.65)
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".geojson", delete=False) as tmp:
+            # Write with indent to force multi-line JSON (embedded newlines)
+            tmp.write(json.dumps(feature1, indent=2) + "\n")
+            tmp.write(json.dumps(feature2) + "\n")
+            tmp_name = tmp.name
+
+        try:
+            geocoder = ShipToGeocoder(_default_geocode_settings(geojson_path=tmp_name))
+            row1 = {"address_1": "100 Main St", "city": "Lima", "state": "OH", "zip": "45801"}
+            lat, lon, source = geocoder.geocode(row1)
+            self.assertIsNotNone(lat)
+            self.assertAlmostEqual(lat, 40.7, places=1)
+
+            row2 = {"address_1": "200 Elm Ave", "city": "Findlay", "state": "OH", "zip": "45840"}
+            lat2, lon2, source2 = geocoder.geocode(row2)
+            self.assertIsNotNone(lat2)
         finally:
             os.unlink(tmp_name)
 

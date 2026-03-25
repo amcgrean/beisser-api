@@ -16,9 +16,12 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from dotenv import load_dotenv
 import psycopg2
 from psycopg2 import sql
 import pyodbc
+
+load_dotenv()
 
 
 LOG_DIR = Path(os.getenv("BEISSER_SYNC_LOG_DIR", "/var/log/beisser_sync"))
@@ -109,9 +112,8 @@ TABLE_CONFIGS = [
         "name": "dispatch_orders",
         "cloud_table": "dispatch_orders",
         "source_query": """
-            EXEC sp_GetDispatchOrders @LastProwid = {last_prowid}
-            -- TODO: Replace with actual SP or:
-            -- SELECT * FROM YourDispatchTable WHERE prowid > {last_prowid}
+            SELECT * FROM dbo.dispatch_orders
+            WHERE prowid > {last_prowid}
         """,
         "pk": "prowid",
         "watermark_col": "prowid",
@@ -121,7 +123,7 @@ TABLE_CONFIGS = [
         "name": "dispatch_routes",
         "cloud_table": "dispatch_routes",
         "source_query": """
-            SELECT * FROM Routes
+            SELECT * FROM dbo.routes
             WHERE prowid > {last_prowid}
         """,
         "pk": "prowid",
@@ -132,7 +134,7 @@ TABLE_CONFIGS = [
         "name": "tag_print_queue",
         "cloud_table": "tag_print_queue",
         "source_query": """
-            SELECT * FROM TagPrintQueue
+            SELECT * FROM dbo.tag_print_queue
             WHERE prowid > {last_prowid}
         """,
         "pk": "prowid",
@@ -143,8 +145,8 @@ TABLE_CONFIGS = [
         "name": "sales_orders",
         "cloud_table": "sales_orders",
         "source_query": """
-            EXEC sp_GetSalesOrders @LastProwid = {last_prowid}
-            -- TODO: Replace with actual SP or direct query
+            SELECT * FROM dbo.so_header
+            WHERE prowid > {last_prowid}
         """,
         "pk": "prowid",
         "watermark_col": "prowid",
@@ -154,7 +156,7 @@ TABLE_CONFIGS = [
         "name": "sales_order_lines",
         "cloud_table": "sales_order_lines",
         "source_query": """
-            SELECT * FROM SalesOrderLines
+            SELECT * FROM dbo.so_detail
             WHERE prowid > {last_prowid}
         """,
         "pk": "prowid",
@@ -165,7 +167,7 @@ TABLE_CONFIGS = [
         "name": "customers",
         "cloud_table": "customers",
         "source_query": """
-            SELECT * FROM Customers
+            SELECT * FROM dbo.cust
             WHERE prowid > {last_prowid}
         """,
         "pk": "prowid",
@@ -177,19 +179,19 @@ TABLE_CONFIGS = [
         "cloud_table": "erp_mirror_cust_shipto",
         "source_query": """
             SELECT *
-            FROM CustomerShipTo
-            WHERE prowid > {last_prowid}
+            FROM dbo.cust_shipto
+            WHERE update_date > '{last_updated}'
         """,
         "pk": ["cust_key", "seq_num"],
-        "watermark_col": "prowid",
-        "use_prowid": True,
+        "watermark_col": "update_date",
+        "use_prowid": False,
         "custom_sync": "customer_shipto",
     },
     {
         "name": "customer_ar",
         "cloud_table": "customer_ar",
         "source_query": """
-            SELECT * FROM CustomerAR
+            SELECT * FROM dbo.customer_ar
             WHERE updated_at > '{last_updated}'
         """,
         "pk": "prowid",
@@ -200,7 +202,7 @@ TABLE_CONFIGS = [
         "name": "inventory",
         "cloud_table": "inventory",
         "source_query": """
-            SELECT * FROM Inventory
+            SELECT * FROM dbo.item
             WHERE prowid > {last_prowid}
         """,
         "pk": "prowid",
@@ -211,7 +213,7 @@ TABLE_CONFIGS = [
         "name": "inventory_alerts",
         "cloud_table": "inventory_alerts",
         "source_query": """
-            SELECT * FROM InventoryAlerts
+            SELECT * FROM dbo.inventory_alerts
             WHERE prowid > {last_prowid}
         """,
         "pk": "prowid",
@@ -222,7 +224,7 @@ TABLE_CONFIGS = [
         "name": "receiving_checkin",
         "cloud_table": "receiving_checkin",
         "source_query": """
-            SELECT * FROM ReceivingCheckIn
+            SELECT * FROM dbo.receiving_checkin
             WHERE prowid > {last_prowid}
         """,
         "pk": "prowid",
@@ -233,7 +235,7 @@ TABLE_CONFIGS = [
         "name": "purchase_orders",
         "cloud_table": "purchase_orders",
         "source_query": """
-            SELECT * FROM PurchaseOrders
+            SELECT * FROM dbo.po_header
             WHERE prowid > {last_prowid}
         """,
         "pk": "prowid",
@@ -372,18 +374,25 @@ class ShipToGeocoder:
         try:
             parsed = json.load(handle)
         except Exception:
+            # Fall back to NDJSON (newline-delimited JSON) streaming.
+            # Handles features that span multiple lines (embedded newlines
+            # in property values) by accumulating lines until a complete
+            # JSON object is parsed.
             try:
                 handle.seek(0)
             except Exception:
                 return
+            buffer = ""
             for line in handle:
-                line = line.strip()
-                if not line:
+                stripped = line.strip()
+                if not stripped:
                     continue
+                buffer += line
                 try:
-                    item = json.loads(line)
-                except Exception:
+                    item = json.loads(buffer)
+                except json.JSONDecodeError:
                     continue
+                buffer = ""
                 if isinstance(item, dict):
                     yield item
             return
@@ -591,23 +600,6 @@ def ensure_shipto_schema(cld_cur) -> None:
         )
         """
     )
-    cld_cur.execute(
-        """
-        SELECT data_type
-        FROM information_schema.columns
-        WHERE table_name = 'erp_mirror_cust_shipto' AND column_name = 'seq_num'
-        """
-    )
-    seq_type_row = cld_cur.fetchone()
-    seq_type = (seq_type_row[0] if seq_type_row else "").lower()
-    if seq_type in {"smallint", "integer", "bigint", "numeric", "decimal"}:
-        log.warning(
-            "Migrating erp_mirror_cust_shipto.seq_num from %s to VARCHAR(64) for compatibility.",
-            seq_type,
-        )
-        cld_cur.execute(
-            "ALTER TABLE erp_mirror_cust_shipto ALTER COLUMN seq_num TYPE VARCHAR(64) USING seq_num::text"
-        )
     cld_cur.execute("ALTER TABLE erp_mirror_cust_shipto ADD COLUMN IF NOT EXISTS lat NUMERIC(9,6)")
     cld_cur.execute("ALTER TABLE erp_mirror_cust_shipto ADD COLUMN IF NOT EXISTS lon NUMERIC(9,6)")
     cld_cur.execute(
@@ -721,8 +713,14 @@ def should_geocode_shipto(row: dict, existing: Optional[dict], settings: dict) -
 
 def sync_customer_shipto(src_cur, cld_cur, config: dict, state: dict, geocoder: ShipToGeocoder) -> int:
     name = config["name"]
-    last_val = state.get(name, {}).get("last_prowid", 0)
-    query = config["source_query"].format(last_prowid=last_val, last_updated="")
+    use_prowid = config.get("use_prowid", True)
+
+    if use_prowid:
+        last_val = state.get(name, {}).get("last_prowid", 0)
+        query = config["source_query"].format(last_prowid=last_val, last_updated="")
+    else:
+        last_val = state.get(name, {}).get("last_updated", "1970-01-01T00:00:00")
+        query = config["source_query"].format(last_prowid=0, last_updated=last_val)
 
     log.info("[%s] Syncing from watermark: %s", name, last_val)
 
@@ -739,9 +737,6 @@ def sync_customer_shipto(src_cur, cld_cur, config: dict, state: dict, geocoder: 
 
     source_columns = [col[0] for col in src_cur.description]
     source_columns_lower = {str(c).lower() for c in source_columns}
-    if "prowid" not in source_columns_lower:
-        log.error("[%s] Source query must include prowid for incremental sync.", name)
-        return 0
     if not source_columns_lower.intersection({"cust_key", "customer_key", "cust"}):
         log.error(
             "[%s] Source query is missing customer key column (expected one of cust_key/customer_key/cust).",
@@ -755,15 +750,25 @@ def sync_customer_shipto(src_cur, cld_cur, config: dict, state: dict, geocoder: 
         )
         return 0
 
+    watermark_col = config.get("watermark_col", "prowid")
     transformed: List[dict] = []
     new_watermark = last_val
     for row in rows:
         source = dict(zip(source_columns, row))
         transformed_row = transform_shipto_row(source)
         transformed.append(transformed_row)
-        prowid = transformed_row.get("source_prowid")
-        if prowid is not None and prowid > new_watermark:
-            new_watermark = prowid
+
+        if use_prowid:
+            prowid = transformed_row.get("source_prowid")
+            if prowid is not None and prowid > new_watermark:
+                new_watermark = prowid
+        else:
+            source_lower = {str(k).lower(): v for k, v in source.items()}
+            updated = source_lower.get(watermark_col) or source_lower.get("updated_at")
+            if updated is not None:
+                updated_str = str(updated)
+                if updated_str > str(new_watermark):
+                    new_watermark = updated_str
 
     keys = [(row["cust_key"], row["seq_num"]) for row in transformed if row["cust_key"]]
     existing_map = fetch_existing_shipto_rows(cld_cur, keys)
@@ -863,7 +868,10 @@ def sync_customer_shipto(src_cur, cld_cur, config: dict, state: dict, geocoder: 
             )
 
     state.setdefault(name, {})
-    state[name]["last_prowid"] = new_watermark
+    if use_prowid:
+        state[name]["last_prowid"] = new_watermark
+    else:
+        state[name]["last_updated"] = new_watermark
 
     log.info(
         "[%s] Synced %s rows. New watermark=%s. Geocode attempted=%s success=%s failed=%s",
