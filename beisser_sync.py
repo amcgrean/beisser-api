@@ -402,10 +402,12 @@ TABLE_CONFIGS = [
 def start_batch(cld_cur, batch_id: str) -> None:
     cld_cur.execute(
         """
-        INSERT INTO erp_sync_batches (batch_id, worker_name, started_at, status, family)
-        VALUES (%s, %s, %s, 'running', 'mixed')
+        INSERT INTO erp_sync_batches
+            (batch_id, worker_name, started_at, status, family,
+             table_count, rows_extracted, rows_staged, rows_upserted, rows_deleted, duration_ms)
+        VALUES (%s, %s, %s, 'running', 'mixed', %s, 0, 0, 0, 0, 0)
         """,
-        [batch_id, WORKER_NAME, _now_utc()],
+        [batch_id, WORKER_NAME, _now_utc(), len(TABLE_CONFIGS)],
     )
 
 
@@ -422,10 +424,11 @@ def finish_batch(
         """
         UPDATE erp_sync_batches
         SET finished_at = %s, status = %s, rows_extracted = %s,
-            rows_upserted = %s, duration_ms = %s, error_message = %s
+            rows_staged = %s, rows_upserted = %s, rows_deleted = 0,
+            duration_ms = %s, error_message = %s
         WHERE batch_id = %s
         """,
-        [_now_utc(), status, rows_extracted, rows_upserted, duration_ms, error, batch_id],
+        [_now_utc(), status, rows_extracted, rows_upserted, rows_upserted, duration_ms, error, batch_id],
     )
 
 
