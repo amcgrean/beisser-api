@@ -13,6 +13,11 @@
 --   - Submissions write semantics untouched
 --
 -- Rollback: See bottom of file for commented DROP statements.
+--
+-- NOTE: Uses plain CREATE INDEX (not CONCURRENTLY) so this can run inside
+-- Supabase SQL Editor's implicit transaction. For large production tables,
+-- you can run the index statements individually with CONCURRENTLY outside
+-- a transaction if needed.
 -- ==========================================================================
 
 
@@ -25,31 +30,31 @@
 -- -------------------------------------------------------------------------
 
 -- so_header: partial index on open orders (is_deleted=false filtered out)
-CREATE INDEX CONCURRENTLY IF NOT EXISTS
+CREATE INDEX IF NOT EXISTS
     idx_so_header_open_orders
     ON erp_mirror_so_header (system_id, so_status)
     WHERE is_deleted = false;
 
 -- so_detail: join on (system_id, so_id), covers item_ptr + filter cols
-CREATE INDEX CONCURRENTLY IF NOT EXISTS
+CREATE INDEX IF NOT EXISTS
     idx_so_detail_so_lookup
     ON erp_mirror_so_detail (system_id, so_id)
     INCLUDE (item_ptr, sequence, backordered_qty);
 
 -- item_branch: join on (system_id, item_ptr), covers handling_code
-CREATE INDEX CONCURRENTLY IF NOT EXISTS
+CREATE INDEX IF NOT EXISTS
     idx_item_branch_item_lookup
     ON erp_mirror_item_branch (system_id, item_ptr)
     INCLUDE (handling_code);
 
 -- cust: join on (system_id, cust_key), covers cust_name
-CREATE INDEX CONCURRENTLY IF NOT EXISTS
+CREATE INDEX IF NOT EXISTS
     idx_cust_key_lookup
     ON erp_mirror_cust (system_id, cust_key)
     INCLUDE (cust_name);
 
 -- cust_shipto: join on (system_id, cust_key, seq_num), covers address cols
-CREATE INDEX CONCURRENTLY IF NOT EXISTS
+CREATE INDEX IF NOT EXISTS
     idx_cust_shipto_key_lookup
     ON erp_mirror_cust_shipto (system_id, cust_key, seq_num)
     INCLUDE (address_1, city);
@@ -124,24 +129,24 @@ GRANT EXECUTE ON FUNCTION get_board_open_orders() TO anon, authenticated;
 
 -- Branch open-PO list: filter (system_id, is_deleted), sort (expect_date, order_date)
 -- system_id is case-sensitive (uppercase branch codes like 'AUS', 'DAL')
-CREATE INDEX CONCURRENTLY IF NOT EXISTS
+CREATE INDEX IF NOT EXISTS
     idx_po_header_branch_open
     ON erp_mirror_po_header (system_id, expect_date ASC NULLS LAST, order_date DESC NULLS LAST)
     INCLUDE (po_id, supplier_key, purchase_type, po_status, wms_status, reference, synced_at)
     WHERE is_deleted = false;
 
 -- PO detail lookup by po_id (numeric path: cast-safe text match)
-CREATE INDEX CONCURRENTLY IF NOT EXISTS
+CREATE INDEX IF NOT EXISTS
     idx_po_header_po_id
     ON erp_mirror_po_header (po_id);
 
 -- PO detail lookup by po_number (non-numeric path)
-CREATE INDEX CONCURRENTLY IF NOT EXISTS
+CREATE INDEX IF NOT EXISTS
     idx_po_header_po_number
     ON erp_mirror_po_header (po_number);
 
 -- Ordering on synced_at for search results
-CREATE INDEX CONCURRENTLY IF NOT EXISTS
+CREATE INDEX IF NOT EXISTS
     idx_po_header_synced_at
     ON erp_mirror_po_header (synced_at DESC NULLS LAST);
 
@@ -151,19 +156,19 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS
 -- -------------------------------------------------------------------------
 
 -- Lookup by po_id with line_number for ORDER BY
-CREATE INDEX CONCURRENTLY IF NOT EXISTS
+CREATE INDEX IF NOT EXISTS
     idx_po_detail_po_id
     ON erp_mirror_po_detail (po_id)
     INCLUDE (line_number);
 
 -- Lookup by po_number (non-numeric detail path)
-CREATE INDEX CONCURRENTLY IF NOT EXISTS
+CREATE INDEX IF NOT EXISTS
     idx_po_detail_po_number
     ON erp_mirror_po_detail (po_number)
     INCLUDE (line_number);
 
 -- Composite join path if views join on system_id + po_id
-CREATE INDEX CONCURRENTLY IF NOT EXISTS
+CREATE INDEX IF NOT EXISTS
     idx_po_detail_system_po
     ON erp_mirror_po_detail (system_id, po_id);
 
@@ -175,10 +180,10 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS
 -- -------------------------------------------------------------------------
 
 -- If app_po_receiving_summary is backed by erp_mirror_po_receiving or similar:
--- CREATE INDEX CONCURRENTLY IF NOT EXISTS
+-- CREATE INDEX IF NOT EXISTS
 --     idx_po_receiving_po_id
 --     ON erp_mirror_po_receiving (po_id);
--- CREATE INDEX CONCURRENTLY IF NOT EXISTS
+-- CREATE INDEX IF NOT EXISTS
 --     idx_po_receiving_po_number
 --     ON erp_mirror_po_receiving (po_number);
 --
@@ -195,15 +200,15 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;
 -- NOTE: These target erp_mirror_po_header assuming app_po_search is a view
 -- over it. If app_po_search has a different backing table, move these indexes.
 
-CREATE INDEX CONCURRENTLY IF NOT EXISTS
+CREATE INDEX IF NOT EXISTS
     idx_po_header_po_number_trgm
     ON erp_mirror_po_header USING gin (po_number gin_trgm_ops);
 
-CREATE INDEX CONCURRENTLY IF NOT EXISTS
+CREATE INDEX IF NOT EXISTS
     idx_po_header_supplier_name_trgm
     ON erp_mirror_po_header USING gin (supplier_name gin_trgm_ops);
 
-CREATE INDEX CONCURRENTLY IF NOT EXISTS
+CREATE INDEX IF NOT EXISTS
     idx_po_header_reference_trgm
     ON erp_mirror_po_header USING gin (reference gin_trgm_ops);
 
@@ -215,12 +220,12 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS
 -- -------------------------------------------------------------------------
 
 -- Submission lookup by po_number + created_at ordering
-CREATE INDEX CONCURRENTLY IF NOT EXISTS
+CREATE INDEX IF NOT EXISTS
     idx_submissions_po_number
     ON submissions (po_number, created_at DESC);
 
 -- Branch-scoped submission lookup (optional eq(branch, :branch))
-CREATE INDEX CONCURRENTLY IF NOT EXISTS
+CREATE INDEX IF NOT EXISTS
     idx_submissions_po_branch
     ON submissions (po_number, branch, created_at DESC);
 
@@ -369,25 +374,25 @@ GRANT EXECUTE ON FUNCTION get_po_detail(text, text) TO anon, authenticated;
 -- -- Part A (WH-Tracker)
 -- DROP FUNCTION IF EXISTS get_board_open_orders();
 -- DROP VIEW IF EXISTS vw_board_open_orders;
--- DROP INDEX CONCURRENTLY IF EXISTS idx_so_header_open_orders;
--- DROP INDEX CONCURRENTLY IF EXISTS idx_so_detail_so_lookup;
--- DROP INDEX CONCURRENTLY IF EXISTS idx_item_branch_item_lookup;
--- DROP INDEX CONCURRENTLY IF EXISTS idx_cust_key_lookup;
--- DROP INDEX CONCURRENTLY IF EXISTS idx_cust_shipto_key_lookup;
+-- DROP INDEX IF EXISTS idx_so_header_open_orders;
+-- DROP INDEX IF EXISTS idx_so_detail_so_lookup;
+-- DROP INDEX IF EXISTS idx_item_branch_item_lookup;
+-- DROP INDEX IF EXISTS idx_cust_key_lookup;
+-- DROP INDEX IF EXISTS idx_cust_shipto_key_lookup;
 --
 -- -- Part B (PO App)
 -- DROP FUNCTION IF EXISTS get_po_detail(text, text);
 -- DROP FUNCTION IF EXISTS get_branch_open_pos(text, integer);
--- DROP INDEX CONCURRENTLY IF EXISTS idx_po_header_branch_open;
--- DROP INDEX CONCURRENTLY IF EXISTS idx_po_header_po_id;
--- DROP INDEX CONCURRENTLY IF EXISTS idx_po_header_po_number;
--- DROP INDEX CONCURRENTLY IF EXISTS idx_po_header_synced_at;
--- DROP INDEX CONCURRENTLY IF EXISTS idx_po_detail_po_id;
--- DROP INDEX CONCURRENTLY IF EXISTS idx_po_detail_po_number;
--- DROP INDEX CONCURRENTLY IF EXISTS idx_po_detail_system_po;
--- DROP INDEX CONCURRENTLY IF EXISTS idx_po_header_po_number_trgm;
--- DROP INDEX CONCURRENTLY IF EXISTS idx_po_header_supplier_name_trgm;
--- DROP INDEX CONCURRENTLY IF EXISTS idx_po_header_reference_trgm;
--- DROP INDEX CONCURRENTLY IF EXISTS idx_submissions_po_number;
--- DROP INDEX CONCURRENTLY IF EXISTS idx_submissions_po_branch;
+-- DROP INDEX IF EXISTS idx_po_header_branch_open;
+-- DROP INDEX IF EXISTS idx_po_header_po_id;
+-- DROP INDEX IF EXISTS idx_po_header_po_number;
+-- DROP INDEX IF EXISTS idx_po_header_synced_at;
+-- DROP INDEX IF EXISTS idx_po_detail_po_id;
+-- DROP INDEX IF EXISTS idx_po_detail_po_number;
+-- DROP INDEX IF EXISTS idx_po_detail_system_po;
+-- DROP INDEX IF EXISTS idx_po_header_po_number_trgm;
+-- DROP INDEX IF EXISTS idx_po_header_supplier_name_trgm;
+-- DROP INDEX IF EXISTS idx_po_header_reference_trgm;
+-- DROP INDEX IF EXISTS idx_submissions_po_number;
+-- DROP INDEX IF EXISTS idx_submissions_po_branch;
 -- DROP EXTENSION IF EXISTS pg_trgm;
