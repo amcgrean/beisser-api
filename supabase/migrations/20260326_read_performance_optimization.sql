@@ -140,11 +140,6 @@ CREATE INDEX IF NOT EXISTS
     idx_po_header_po_id
     ON erp_mirror_po_header (po_id);
 
--- PO detail lookup by po_number (non-numeric path)
-CREATE INDEX IF NOT EXISTS
-    idx_po_header_po_number
-    ON erp_mirror_po_header (po_number);
-
 -- Ordering on synced_at for search results
 CREATE INDEX IF NOT EXISTS
     idx_po_header_synced_at
@@ -159,12 +154,6 @@ CREATE INDEX IF NOT EXISTS
 CREATE INDEX IF NOT EXISTS
     idx_po_detail_po_id
     ON erp_mirror_po_detail (po_id)
-    INCLUDE (line_number);
-
--- Lookup by po_number (non-numeric detail path)
-CREATE INDEX IF NOT EXISTS
-    idx_po_detail_po_number
-    ON erp_mirror_po_detail (po_number)
     INCLUDE (line_number);
 
 -- Composite join path if views join on system_id + po_id
@@ -201,8 +190,8 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;
 -- over it. If app_po_search has a different backing table, move these indexes.
 
 CREATE INDEX IF NOT EXISTS
-    idx_po_header_po_number_trgm
-    ON erp_mirror_po_header USING gin (po_number gin_trgm_ops);
+    idx_po_header_po_id_trgm
+    ON erp_mirror_po_header USING gin (po_id gin_trgm_ops);
 
 CREATE INDEX IF NOT EXISTS
     idx_po_header_supplier_name_trgm
@@ -385,12 +374,10 @@ GRANT EXECUTE ON FUNCTION get_po_detail(text, text) TO anon, authenticated;
 -- DROP FUNCTION IF EXISTS get_branch_open_pos(text, integer);
 -- DROP INDEX IF EXISTS idx_po_header_branch_open;
 -- DROP INDEX IF EXISTS idx_po_header_po_id;
--- DROP INDEX IF EXISTS idx_po_header_po_number;
 -- DROP INDEX IF EXISTS idx_po_header_synced_at;
 -- DROP INDEX IF EXISTS idx_po_detail_po_id;
--- DROP INDEX IF EXISTS idx_po_detail_po_number;
 -- DROP INDEX IF EXISTS idx_po_detail_system_po;
--- DROP INDEX IF EXISTS idx_po_header_po_number_trgm;
+-- DROP INDEX IF EXISTS idx_po_header_po_id_trgm;
 -- DROP INDEX IF EXISTS idx_po_header_supplier_name_trgm;
 -- DROP INDEX IF EXISTS idx_po_header_reference_trgm;
 -- DROP INDEX IF EXISTS idx_submissions_po_number;
