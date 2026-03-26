@@ -2,9 +2,17 @@
 -- Performance Optimization: WH-Tracker + PO App
 -- Migration-safe, additive-only (no drops, no breaking changes)
 --
--- Rollback: DROP each index/function created here by name.
---           Views are CREATE OR REPLACE so the old definition is gone;
---           re-deploy the previous migration to restore.
+-- CONTRACT GUARANTEES:
+--   - All existing views (app_po_search, app_po_header, app_po_detail,
+--     app_po_receiving_summary) remain unchanged
+--   - All existing tables remain unchanged
+--   - New RPC functions are OPTIONAL — apps can adopt at their own pace
+--   - Soft-delete (is_deleted=false) semantics preserved everywhere
+--   - system_id is case-sensitive (uppercase branch codes)
+--   - Numeric po_id lookup path preserved
+--   - Submissions write semantics untouched
+--
+-- Rollback: See bottom of file for commented DROP statements.
 -- ==========================================================================
 
 
@@ -115,16 +123,22 @@ GRANT EXECUTE ON FUNCTION get_board_open_orders() TO anon, authenticated;
 -- -------------------------------------------------------------------------
 
 -- Branch open-PO list: filter (system_id, is_deleted), sort (expect_date, order_date)
+-- system_id is case-sensitive (uppercase branch codes like 'AUS', 'DAL')
 CREATE INDEX CONCURRENTLY IF NOT EXISTS
     idx_po_header_branch_open
-    ON erp_mirror_po_header (system_id, is_deleted, expect_date ASC NULLS LAST, order_date DESC NULLS LAST)
+    ON erp_mirror_po_header (system_id, expect_date ASC NULLS LAST, order_date DESC NULLS LAST)
     INCLUDE (po_id, supplier_key, purchase_type, po_status, wms_status, reference, synced_at)
     WHERE is_deleted = false;
 
--- PO detail lookup by po_id (used by app_po_header, app_po_detail, app_po_receiving_summary views)
+-- PO detail lookup by po_id (numeric path: cast-safe text match)
 CREATE INDEX CONCURRENTLY IF NOT EXISTS
     idx_po_header_po_id
     ON erp_mirror_po_header (po_id);
+
+-- PO detail lookup by po_number (non-numeric path)
+CREATE INDEX CONCURRENTLY IF NOT EXISTS
+    idx_po_header_po_number
+    ON erp_mirror_po_header (po_number);
 
 -- Ordering on synced_at for search results
 CREATE INDEX CONCURRENTLY IF NOT EXISTS
@@ -136,31 +150,50 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS
 -- B2. INDEXES on erp_mirror_po_detail (backs app_po_detail view)
 -- -------------------------------------------------------------------------
 
+-- Lookup by po_id with line_number for ORDER BY
 CREATE INDEX CONCURRENTLY IF NOT EXISTS
     idx_po_detail_po_id
     ON erp_mirror_po_detail (po_id)
     INCLUDE (line_number);
 
--- If the view joins on system_id + po_id:
+-- Lookup by po_number (non-numeric detail path)
+CREATE INDEX CONCURRENTLY IF NOT EXISTS
+    idx_po_detail_po_number
+    ON erp_mirror_po_detail (po_number)
+    INCLUDE (line_number);
+
+-- Composite join path if views join on system_id + po_id
 CREATE INDEX CONCURRENTLY IF NOT EXISTS
     idx_po_detail_system_po
     ON erp_mirror_po_detail (system_id, po_id);
 
 
 -- -------------------------------------------------------------------------
--- B3. TRIGRAM INDEXES for ILIKE search on app_po_search
---     Requires: CREATE EXTENSION IF NOT EXISTS pg_trgm;
+-- B3. INDEXES on app_po_receiving backing tables
+--     (Indexes on the view's underlying table — adjust table name if
+--      the receiving summary view references a different base table)
 -- -------------------------------------------------------------------------
 
--- Enable trigram extension (idempotent)
+-- If app_po_receiving_summary is backed by erp_mirror_po_receiving or similar:
+-- CREATE INDEX CONCURRENTLY IF NOT EXISTS
+--     idx_po_receiving_po_id
+--     ON erp_mirror_po_receiving (po_id);
+-- CREATE INDEX CONCURRENTLY IF NOT EXISTS
+--     idx_po_receiving_po_number
+--     ON erp_mirror_po_receiving (po_number);
+--
+-- ^^^ UNCOMMENT after confirming the backing table name.
+
+
+-- -------------------------------------------------------------------------
+-- B4. TRIGRAM INDEXES for ILIKE search on app_po_search
+--     Accelerates: or(po_number.ilike.%q%, supplier_name.ilike.%q%, reference.ilike.%q%)
+-- -------------------------------------------------------------------------
+
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
--- These indexes accelerate the ILIKE %query% pattern on the search view.
--- If app_po_search is a view over erp_mirror_po_header, these go on that
--- table. If it is a materialized view or separate table, adjust the target.
---
--- NOTE: If these columns live on a different underlying table than
--- erp_mirror_po_header, change the table name below accordingly.
+-- NOTE: These target erp_mirror_po_header assuming app_po_search is a view
+-- over it. If app_po_search has a different backing table, move these indexes.
 
 CREATE INDEX CONCURRENTLY IF NOT EXISTS
     idx_po_header_po_number_trgm
@@ -176,8 +209,9 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS
 
 
 -- -------------------------------------------------------------------------
--- B4. INDEXES on submissions table
+-- B5. INDEXES on submissions table
 --     Covers: summary per PO list row (IN query), detail page list
+--     WRITE SEMANTICS UNCHANGED — these are read-only indexes
 -- -------------------------------------------------------------------------
 
 -- Submission lookup by po_number + created_at ordering
@@ -185,21 +219,27 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS
     idx_submissions_po_number
     ON submissions (po_number, created_at DESC);
 
--- Branch-scoped submission lookup
+-- Branch-scoped submission lookup (optional eq(branch, :branch))
 CREATE INDEX CONCURRENTLY IF NOT EXISTS
     idx_submissions_po_branch
     ON submissions (po_number, branch, created_at DESC);
 
 
 -- -------------------------------------------------------------------------
--- B5. RPC — supabase.rpc('get_branch_open_pos', { branch_id, row_limit })
---     Replaces the client-side query + app-side status filtering.
---     Pushes the status exclusion into the database so fewer rows travel
---     over the wire and Supabase doesn't scan rows the app will discard.
+-- B6. RPC — supabase.rpc('get_branch_open_pos', { branch_id, row_limit })
+--
+--     OPTIONAL replacement for the current direct-table query.
+--     Returns the SAME columns in the SAME order as the current select().
+--
+--     IMPORTANT: Does NOT filter by po_status server-side.
+--     The app currently does status filtering client-side and the exact
+--     excluded statuses are app logic. This RPC preserves that contract —
+--     it only pushes the is_deleted + branch filter + sort into a function
+--     for plan caching. The app continues to filter statuses as before.
 -- -------------------------------------------------------------------------
 
 CREATE OR REPLACE FUNCTION get_branch_open_pos(
-    branch_id  text,
+    branch_id  text,            -- uppercase system_id, e.g. 'AUS'
     row_limit  integer DEFAULT 250
 )
 RETURNS TABLE (
@@ -232,10 +272,6 @@ AS $$
     FROM erp_mirror_po_header h
     WHERE h.system_id  = branch_id
       AND h.is_deleted = false
-      -- Exclude closed / cancelled / fully-received statuses server-side
-      -- so fewer rows cross the wire.  Adjust these values to match
-      -- the exact statuses your app currently filters out.
-      AND h.po_status NOT IN ('C', 'X', 'R')
     ORDER BY
         h.expect_date ASC NULLS LAST,
         h.order_date  DESC NULLS LAST
@@ -246,9 +282,22 @@ GRANT EXECUTE ON FUNCTION get_branch_open_pos(text, integer) TO anon, authentica
 
 
 -- -------------------------------------------------------------------------
--- B6. RPC — supabase.rpc('get_po_detail', { filter_col, filter_val })
---     Runs the three parallel detail queries in a single round-trip.
---     Returns a JSON object with { header, lines, receiving_summary }.
+-- B7. RPC — supabase.rpc('get_po_detail', { filter_col, filter_val })
+--
+--     OPTIONAL single-round-trip replacement for the 3 parallel queries.
+--     Returns { header, lines, receiving_summary } as JSONB.
+--
+--     CONTRACT:
+--       - header: full row from app_po_header (null if not found)
+--       - lines: array from app_po_detail ordered by line_number ASC
+--                (empty array if none)
+--       - receiving_summary: full row from app_po_receiving_summary
+--                            (null if not found)
+--       - filter_col must be 'po_id' or 'po_number'
+--       - po_id path: numeric string lookup (e.g. '12345')
+--       - po_number path: alphanumeric lookup (e.g. 'PO-12345')
+--       - Nullability: header/receiving_summary may be JSON null;
+--                      lines is always an array (possibly empty)
 -- -------------------------------------------------------------------------
 
 CREATE OR REPLACE FUNCTION get_po_detail(
@@ -266,36 +315,45 @@ DECLARE
     lines jsonb;
     recv  jsonb;
 BEGIN
-    -- Validate filter_col to prevent SQL injection
+    -- Whitelist filter_col to prevent injection
     IF filter_col NOT IN ('po_id', 'po_number') THEN
-        RAISE EXCEPTION 'Invalid filter column: %', filter_col;
+        RAISE EXCEPTION 'Invalid filter column: %. Must be po_id or po_number.', filter_col;
     END IF;
 
-    -- Header
     IF filter_col = 'po_id' THEN
         SELECT to_jsonb(h) INTO hdr
-        FROM app_po_header h WHERE h.po_id = filter_val LIMIT 1;
+          FROM app_po_header h
+         WHERE h.po_id::text = filter_val
+         LIMIT 1;
 
         SELECT COALESCE(jsonb_agg(d ORDER BY d.line_number), '[]'::jsonb) INTO lines
-        FROM app_po_detail d WHERE d.po_id = filter_val;
+          FROM app_po_detail d
+         WHERE d.po_id::text = filter_val;
 
         SELECT to_jsonb(r) INTO recv
-        FROM app_po_receiving_summary r WHERE r.po_id = filter_val LIMIT 1;
+          FROM app_po_receiving_summary r
+         WHERE r.po_id::text = filter_val
+         LIMIT 1;
     ELSE
         SELECT to_jsonb(h) INTO hdr
-        FROM app_po_header h WHERE h.po_number = filter_val LIMIT 1;
+          FROM app_po_header h
+         WHERE h.po_number = filter_val
+         LIMIT 1;
 
         SELECT COALESCE(jsonb_agg(d ORDER BY d.line_number), '[]'::jsonb) INTO lines
-        FROM app_po_detail d WHERE d.po_number = filter_val;
+          FROM app_po_detail d
+         WHERE d.po_number = filter_val;
 
         SELECT to_jsonb(r) INTO recv
-        FROM app_po_receiving_summary r WHERE r.po_number = filter_val LIMIT 1;
+          FROM app_po_receiving_summary r
+         WHERE r.po_number = filter_val
+         LIMIT 1;
     END IF;
 
     result := jsonb_build_object(
-        'header',            COALESCE(hdr, 'null'::jsonb),
+        'header',            COALESCE(hdr,   'null'::jsonb),
         'lines',             COALESCE(lines, '[]'::jsonb),
-        'receiving_summary', COALESCE(recv, 'null'::jsonb)
+        'receiving_summary', COALESCE(recv,  'null'::jsonb)
     );
 
     RETURN result;
@@ -322,8 +380,10 @@ GRANT EXECUTE ON FUNCTION get_po_detail(text, text) TO anon, authenticated;
 -- DROP FUNCTION IF EXISTS get_branch_open_pos(text, integer);
 -- DROP INDEX CONCURRENTLY IF EXISTS idx_po_header_branch_open;
 -- DROP INDEX CONCURRENTLY IF EXISTS idx_po_header_po_id;
+-- DROP INDEX CONCURRENTLY IF EXISTS idx_po_header_po_number;
 -- DROP INDEX CONCURRENTLY IF EXISTS idx_po_header_synced_at;
 -- DROP INDEX CONCURRENTLY IF EXISTS idx_po_detail_po_id;
+-- DROP INDEX CONCURRENTLY IF EXISTS idx_po_detail_po_number;
 -- DROP INDEX CONCURRENTLY IF EXISTS idx_po_detail_system_po;
 -- DROP INDEX CONCURRENTLY IF EXISTS idx_po_header_po_number_trgm;
 -- DROP INDEX CONCURRENTLY IF EXISTS idx_po_header_supplier_name_trgm;
