@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import time
+import uuid
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -123,30 +124,48 @@ SHIPTO_GEOCODE_SETTINGS = {
 
 TABLE_CONFIGS = [
     # ------------------------------------------------------------------
-    # customer_shipto: Pi-side geocoding enrichment on erp_mirror_cust_shipto.
+    # customer_shipto: full upsert + Pi-side geocoding enrichment.
+    # loc_id provides system_id; prowid aliased for source tracking.
     # ------------------------------------------------------------------
     {
         "name": "customer_shipto",
         "cloud_table": "erp_mirror_cust_shipto",
+        "family": "master",
         "source_query": """
-            SELECT *
+            SELECT
+                loc_id          AS system_id,
+                cust_key,
+                seq_num,
+                shipto_name,
+                address_1,
+                address_2,
+                city,
+                state,
+                zip,
+                attention,
+                phone,
+                branch_code,
+                prowid          AS source_prowid,
+                update_date     AS source_updated_at
             FROM dbo.cust_shipto
             WHERE update_date > '{last_updated}'
         """,
-        "pk": ["cust_key", "seq_num"],
-        "watermark_col": "update_date",
+        "pk": ["system_id", "cust_key", "seq_num"],
+        "watermark_col": "source_updated_at",
         "use_prowid": False,
         "custom_sync": "customer_shipto",
     },
     # ------------------------------------------------------------------
     # shipments_header: dbo.dispatch_orders → erp_mirror_shipments_header
-    # KEY FIX: so_num (Agility) aliased to so_id (cloud schema).
+    # KEY FIX: so_num aliased to so_id; loc_id provides system_id.
     # ------------------------------------------------------------------
     {
         "name": "shipments_header",
         "cloud_table": "erp_mirror_shipments_header",
+        "family": "operational",
         "source_query": """
             SELECT
+                loc_id          AS system_id,
                 so_num          AS so_id,
                 seq_num         AS shipment_num,
                 ship_date,
@@ -169,7 +188,6 @@ TABLE_CONFIGS = [
         "watermark_col": "source_updated_at",
         "use_prowid": False,
         "inject_columns": {
-            "system_id": _get_system_id,
             "synced_at": _now_utc,
             "is_deleted": False,
         },
@@ -180,8 +198,10 @@ TABLE_CONFIGS = [
     {
         "name": "so_header",
         "cloud_table": "erp_mirror_so_header",
+        "family": "operational",
         "source_query": """
             SELECT
+                loc_id          AS system_id,
                 so_num          AS so_id,
                 so_status,
                 sale_type,
@@ -206,7 +226,6 @@ TABLE_CONFIGS = [
         "watermark_col": "source_updated_at",
         "use_prowid": False,
         "inject_columns": {
-            "system_id": _get_system_id,
             "synced_at": _now_utc,
             "is_deleted": False,
         },
@@ -217,8 +236,10 @@ TABLE_CONFIGS = [
     {
         "name": "so_detail",
         "cloud_table": "erp_mirror_so_detail",
+        "family": "operational",
         "source_query": """
             SELECT
+                loc_id          AS system_id,
                 so_num          AS so_id,
                 seq_num         AS sequence,
                 item_ptr,
@@ -236,7 +257,6 @@ TABLE_CONFIGS = [
         "watermark_col": "source_updated_at",
         "use_prowid": False,
         "inject_columns": {
-            "system_id": _get_system_id,
             "synced_at": _now_utc,
             "is_deleted": False,
         },
@@ -247,8 +267,10 @@ TABLE_CONFIGS = [
     {
         "name": "customers",
         "cloud_table": "erp_mirror_cust",
+        "family": "master",
         "source_query": """
             SELECT
+                loc_id          AS system_id,
                 cust_num        AS cust_key,
                 cust_code,
                 cust_name,
@@ -267,7 +289,6 @@ TABLE_CONFIGS = [
         "watermark_col": "source_updated_at",
         "use_prowid": False,
         "inject_columns": {
-            "system_id": _get_system_id,
             "synced_at": _now_utc,
             "is_deleted": False,
         },
@@ -278,8 +299,10 @@ TABLE_CONFIGS = [
     {
         "name": "po_header",
         "cloud_table": "erp_mirror_po_header",
+        "family": "operational",
         "source_query": """
             SELECT
+                loc_id              AS system_id,
                 po_num              AS po_id,
                 purchase_type,
                 vend_num            AS supplier_key,
@@ -306,7 +329,6 @@ TABLE_CONFIGS = [
         "watermark_col": "source_updated_at",
         "use_prowid": False,
         "inject_columns": {
-            "system_id": _get_system_id,
             "synced_at": _now_utc,
             "is_deleted": False,
         },
@@ -317,8 +339,10 @@ TABLE_CONFIGS = [
     {
         "name": "receiving_header",
         "cloud_table": "erp_mirror_receiving_header",
+        "family": "operational",
         "source_query": """
             SELECT
+                loc_id          AS system_id,
                 po_num          AS po_id,
                 recv_seq        AS receive_num,
                 recv_date       AS receive_date,
@@ -336,7 +360,6 @@ TABLE_CONFIGS = [
         "watermark_col": "source_updated_at",
         "use_prowid": False,
         "inject_columns": {
-            "system_id": _get_system_id,
             "synced_at": _now_utc,
             "is_deleted": False,
         },
@@ -347,8 +370,10 @@ TABLE_CONFIGS = [
     {
         "name": "print_transaction",
         "cloud_table": "erp_mirror_print_transaction",
+        "family": "operational",
         "source_query": """
             SELECT
+                loc_id          AS system_id,
                 tran_id,
                 tran_type,
                 created_at,
@@ -360,7 +385,6 @@ TABLE_CONFIGS = [
         "watermark_col": "source_updated_at",
         "use_prowid": False,
         "inject_columns": {
-            "system_id": _get_system_id,
             "synced_at": _now_utc,
             "is_deleted": False,
         },
@@ -371,14 +395,113 @@ TABLE_CONFIGS = [
 ]
 
 
+WORKER_NAME = "agility-pi-sync"
+
+
 def _now_utc() -> datetime:
     """Return current UTC time without tzinfo (for Postgres TIMESTAMP WITHOUT TIME ZONE)."""
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-def _get_system_id() -> str:
-    """Return the configured ERP system/branch identifier (e.g. '10FD', '20GR')."""
-    return os.getenv("SYSTEM_ID", "")
+# ---------------------------------------------------------------------------
+# Sync state / batch tracking (mirrors the agility-pi-sync infrastructure)
+# ---------------------------------------------------------------------------
+
+def start_batch(cld_cur, batch_id: str) -> None:
+    cld_cur.execute(
+        """
+        INSERT INTO erp_sync_batches (batch_id, worker_name, started_at, status, family)
+        VALUES (%s, %s, %s, 'running', 'mixed')
+        """,
+        [batch_id, WORKER_NAME, _now_utc()],
+    )
+
+
+def finish_batch(
+    cld_cur,
+    batch_id: str,
+    status: str,
+    rows_extracted: int,
+    rows_upserted: int,
+    duration_ms: int,
+    error: Optional[str] = None,
+) -> None:
+    cld_cur.execute(
+        """
+        UPDATE erp_sync_batches
+        SET finished_at = %s, status = %s, rows_extracted = %s,
+            rows_upserted = %s, duration_ms = %s, error_message = %s
+        WHERE batch_id = %s
+        """,
+        [_now_utc(), status, rows_extracted, rows_upserted, duration_ms, error, batch_id],
+    )
+
+
+def update_table_state(
+    cld_cur,
+    table_name: str,
+    family: str,
+    batch_id: str,
+    status: str,
+    row_count: int,
+    watermark,
+    duration_ms: int,
+    error: Optional[str] = None,
+) -> None:
+    now = _now_utc()
+    success_at = now if status == "success" else None
+    error_at = now if status == "error" else None
+    watermark_dt: Optional[datetime] = None
+    if watermark and watermark != "1970-01-01T00:00:00":
+        try:
+            watermark_dt = datetime.fromisoformat(str(watermark).replace("T", " ").split(".")[0])
+        except (ValueError, TypeError):
+            pass
+
+    cld_cur.execute(
+        """
+        UPDATE erp_sync_table_state
+        SET last_batch_id = %s, last_status = %s,
+            last_success_at = COALESCE(%s, last_success_at),
+            last_error_at   = COALESCE(%s, last_error_at),
+            last_error = %s, last_source_updated_at = COALESCE(%s, last_source_updated_at),
+            last_row_count = %s, last_duration_ms = %s
+        WHERE table_name = %s
+        """,
+        [batch_id, status, success_at, error_at, error, watermark_dt,
+         row_count, duration_ms, table_name],
+    )
+    if cld_cur.rowcount == 0:
+        cld_cur.execute(
+            """
+            INSERT INTO erp_sync_table_state
+                (table_name, family, strategy, last_batch_id, last_status,
+                 last_success_at, last_error_at, last_error,
+                 last_source_updated_at, last_row_count, last_duration_ms)
+            VALUES (%s, %s, 'incremental', %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            [table_name, family, batch_id, status, success_at, error_at,
+             error, watermark_dt, row_count, duration_ms],
+        )
+
+
+def update_sync_state(cld_cur, status: str, total_rows: int, errors: List[str]) -> None:
+    now = _now_utc()
+    counts = json.dumps({"rows_upserted": total_rows})
+    error_str = f"Errors in: {', '.join(errors)}" if errors else None
+    success_at = now if not errors else None
+    error_at = now if errors else None
+    cld_cur.execute(
+        """
+        UPDATE erp_sync_state
+        SET last_heartbeat_at = %s, last_status = %s, last_counts_json = %s,
+            last_error = %s,
+            last_success_at = COALESCE(%s, last_success_at),
+            last_error_at   = COALESCE(%s, last_error_at)
+        WHERE worker_name = %s
+        """,
+        [now, status, counts, error_str, success_at, error_at, WORKER_NAME],
+    )
 
 
 def get_source_connection():
@@ -643,13 +766,16 @@ class ShipToGeocoder:
         return self._query_nominatim(row)
 
 
-def sync_table(src_cur, cld_cur, config: dict, state: dict) -> int:
+def sync_table(src_cur, cld_cur, config: dict, state: dict, batch_id: Optional[str] = None) -> int:
     name = config["name"]
     cloud_table = config["cloud_table"]
     pk_config = config["pk"]
     pk_columns = [pk_config] if isinstance(pk_config, str) else pk_config
     use_prowid = config["use_prowid"]
-    inject = config.get("inject_columns", {})
+    inject = dict(config.get("inject_columns", {}))
+    if batch_id:
+        inject.setdefault("sync_batch_id", batch_id)
+    table_start = _now_utc()
 
     if use_prowid:
         last_val = state.get(name, {}).get("last_prowid", 0)
@@ -725,6 +851,16 @@ def sync_table(src_cur, cld_cur, config: dict, state: dict) -> int:
     else:
         state[name]["last_updated"] = new_watermark
 
+    duration_ms = int((_now_utc() - table_start).total_seconds() * 1000)
+    if batch_id:
+        try:
+            update_table_state(
+                cld_cur, cloud_table, config.get("family", "operational"),
+                batch_id, "success", row_count, new_watermark, duration_ms,
+            )
+        except Exception as exc:
+            log.warning("[%s] Failed to update table state: %s", name, exc)
+
     log.info("[%s] Synced %s rows. New watermark: %s", name, row_count, new_watermark)
     return row_count
 
@@ -763,6 +899,7 @@ def transform_shipto_row(src_row: dict) -> dict:
     seq_num = str(seq_raw or "").strip()
 
     return {
+        "system_id": _source_value(row, "system_id", "loc_id"),
         "cust_key": str(_source_value(row, "cust_key", "customer_key", "cust") or "").strip(),
         "seq_num": seq_num,
         "shipto_name": _source_value(row, "shipto_name", "name"),
@@ -774,8 +911,8 @@ def transform_shipto_row(src_row: dict) -> dict:
         "attention": _source_value(row, "attention", "attn"),
         "phone": _source_value(row, "phone"),
         "branch_code": _source_value(row, "branch_code", "branch"),
-        "source_prowid": _source_value(row, "prowid"),
-        "source_updated_at": _source_value(row, "update_date", "updated_at"),
+        "source_prowid": _source_value(row, "source_prowid", "prowid"),
+        "source_updated_at": _source_value(row, "source_updated_at", "update_date", "updated_at"),
     }
 
 
@@ -790,20 +927,22 @@ def addresses_equal(current: dict, existing: dict) -> bool:
 _FETCH_BATCH_SIZE = 500  # max keys per IN-clause to avoid stack depth limits
 
 
-def fetch_existing_shipto_rows(cld_cur, keys: List[Tuple[str, str]]) -> dict:
+def fetch_existing_shipto_rows(cld_cur, keys: List[Tuple[str, str, str]]) -> dict:
+    """Fetch existing shipto rows by (system_id, cust_key, seq_num) for geocoding decisions."""
     if not keys:
         return {}
 
     mapped = {}
     for batch_start in range(0, len(keys), _FETCH_BATCH_SIZE):
         batch = keys[batch_start : batch_start + _FETCH_BATCH_SIZE]
-        placeholders = ",".join(["(%s,%s::integer)"] * len(batch))
+        placeholders = ",".join(["(%s,%s,%s::integer)"] * len(batch))
         params: List[object] = []
-        for cust_key, seq_num in batch:
-            params.extend([cust_key, seq_num])
+        for system_id, cust_key, seq_num in batch:
+            params.extend([system_id, cust_key, seq_num])
 
         query = f"""
             SELECT
+                system_id,
                 cust_key,
                 seq_num::text AS seq_num,
                 address_1,
@@ -816,7 +955,7 @@ def fetch_existing_shipto_rows(cld_cur, keys: List[Tuple[str, str]]) -> dict:
                 geocode_source,
                 geocoded_at
             FROM erp_mirror_cust_shipto
-            WHERE (cust_key, seq_num) IN ({placeholders})
+            WHERE (system_id, cust_key, seq_num) IN ({placeholders})
         """
 
         cld_cur.execute(query, params)
@@ -824,7 +963,7 @@ def fetch_existing_shipto_rows(cld_cur, keys: List[Tuple[str, str]]) -> dict:
         columns = [col[0] for col in cld_cur.description]
         for row in rows:
             row_dict = dict(zip(columns, row))
-            mapped[(str(row_dict["cust_key"]), str(row_dict["seq_num"]))] = row_dict
+            mapped[(str(row_dict["system_id"]), str(row_dict["cust_key"]), str(row_dict["seq_num"]))] = row_dict
 
     return mapped
 
@@ -852,7 +991,7 @@ def should_geocode_shipto(row: dict, existing: Optional[dict], settings: dict) -
     return not has_coords
 
 
-def sync_customer_shipto(src_cur, cld_cur, config: dict, state: dict, geocoder: ShipToGeocoder) -> int:
+def sync_customer_shipto(src_cur, cld_cur, config: dict, state: dict, geocoder: ShipToGeocoder, batch_id: Optional[str] = None) -> int:
     name = config["name"]
     use_prowid = config.get("use_prowid", True)
 
@@ -911,23 +1050,29 @@ def sync_customer_shipto(src_cur, cld_cur, config: dict, state: dict, geocoder: 
                 if updated_str > str(new_watermark):
                     new_watermark = updated_str
 
-    keys = [(row["cust_key"], row["seq_num"]) for row in transformed if row["cust_key"]]
+    keys = [
+        (row["system_id"], row["cust_key"], row["seq_num"])
+        for row in transformed
+        if row["cust_key"] and row["system_id"]
+    ]
     existing_map = fetch_existing_shipto_rows(cld_cur, keys)
 
     geocode_attempted = 0
     geocode_success = 0
     geocode_failed = 0
 
-    # The erp_mirror_cust_shipto table is owned by the main ERP sync worker.
-    # Its unique constraint is (system_id, cust_key, seq_num).
-    # We UPDATE geocoding columns on rows that already exist.
-    geocode_update_stmt = sql.SQL(
-        """
-        UPDATE erp_mirror_cust_shipto
-        SET lat = %s, lon = %s, geocoded_at = %s, geocode_source = %s
-        WHERE cust_key = %s AND seq_num = %s::integer
-        """
-    )
+    # Full upsert: insert all shipto columns + geocoding columns in one pass.
+    # ON CONFLICT targets the (system_id, cust_key, seq_num) unique key.
+    _SHIPTO_UPSERT_COLS = [
+        "system_id", "cust_key", "seq_num",
+        "shipto_name", "address_1", "address_2",
+        "city", "state", "zip",
+        "attention", "phone", "branch_code",
+        "source_prowid", "source_updated_at",
+        "lat", "lon", "geocoded_at", "geocode_source",
+        "synced_at", "is_deleted",
+    ]
+    _SHIPTO_PK = {"system_id", "cust_key", "seq_num"}
 
     now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
     batch_size = SHIPTO_GEOCODE_SETTINGS["batch_size"]
@@ -940,17 +1085,20 @@ def sync_customer_shipto(src_cur, cld_cur, config: dict, state: dict, geocoder: 
         if not row["seq_num"]:
             log.warning("[%s] Skipping row with missing seq_num (cust_key=%s)", name, row["cust_key"])
             continue
+        if not row["system_id"]:
+            log.warning("[%s] Skipping row with missing system_id (cust_key=%s seq_num=%s)", name, row["cust_key"], row["seq_num"])
+            continue
 
-        key = (row["cust_key"], row["seq_num"])
+        key = (row["system_id"], row["cust_key"], row["seq_num"])
         existing = existing_map.get(key)
 
         if should_geocode_shipto(row, existing, SHIPTO_GEOCODE_SETTINGS):
             geocode_attempted += 1
-            lat, lon, source = geocoder.geocode(row)
+            lat, lon, geocode_src = geocoder.geocode(row)
             row["lat"] = lat
             row["lon"] = lon
             row["geocoded_at"] = now_utc
-            row["geocode_source"] = source
+            row["geocode_source"] = geocode_src
             if lat is not None and lon is not None:
                 geocode_success += 1
             else:
@@ -961,17 +1109,31 @@ def sync_customer_shipto(src_cur, cld_cur, config: dict, state: dict, geocoder: 
             row["geocoded_at"] = existing.get("geocoded_at") if existing else None
             row["geocode_source"] = existing.get("geocode_source") if existing else None
 
+        row["synced_at"] = now_utc
+        row["is_deleted"] = False
+
+        upsert_cols = list(_SHIPTO_UPSERT_COLS)
+        if batch_id and "sync_batch_id" not in upsert_cols:
+            upsert_cols.append("sync_batch_id")
+            row["sync_batch_id"] = batch_id
+
+        upsert_stmt = sql.SQL(
+            "INSERT INTO erp_mirror_cust_shipto ({}) VALUES ({}) "
+            "ON CONFLICT (system_id, cust_key, seq_num) DO UPDATE SET {}"
+        ).format(
+            sql.SQL(", ").join(sql.Identifier(c) for c in upsert_cols),
+            sql.SQL(", ").join(sql.Placeholder() for _ in upsert_cols),
+            sql.SQL(", ").join(
+                sql.SQL("{} = EXCLUDED.{}").format(sql.Identifier(c), sql.Identifier(c))
+                for c in upsert_cols if c not in _SHIPTO_PK
+            ),
+        )
+
         try:
-            cld_cur.execute(geocode_update_stmt, [
-                row["lat"], row["lon"], row["geocoded_at"], row["geocode_source"],
-                row["cust_key"], row["seq_num"],
-            ])
-            if cld_cur.rowcount > 0:
-                row_count += 1
-            else:
-                log.debug("[%s] No matching row for key=%s:%s (not yet synced by ERP worker?)", name, row["cust_key"], row["seq_num"])
+            cld_cur.execute(upsert_stmt, [row.get(c) for c in upsert_cols])
+            row_count += 1
         except Exception as exc:
-            log.warning("[%s] Update failed for key=%s:%s: %s", name, row["cust_key"], row["seq_num"], exc)
+            log.warning("[%s] Upsert failed for key=%s:%s:%s: %s", name, row["system_id"], row["cust_key"], row["seq_num"], exc)
             cld_cur.connection.rollback()
 
         if idx % batch_size == 0:
@@ -991,6 +1153,15 @@ def sync_customer_shipto(src_cur, cld_cur, config: dict, state: dict, geocoder: 
     else:
         state[name]["last_updated"] = new_watermark
 
+    if batch_id:
+        try:
+            update_table_state(
+                cld_cur, config["cloud_table"], config.get("family", "master"),
+                batch_id, "success", row_count, new_watermark, 0,
+            )
+        except Exception as exc:
+            log.warning("[%s] Failed to update table state: %s", name, exc)
+
     log.info(
         "[%s] Synced %s rows. New watermark=%s. Geocode attempted=%s success=%s failed=%s",
         name,
@@ -1004,10 +1175,12 @@ def sync_customer_shipto(src_cur, cld_cur, config: dict, state: dict, geocoder: 
 
 
 def main() -> None:
-    log.info("=== Beisser Sync Starting ===")
+    batch_id = uuid.uuid4().hex
+    batch_start = _now_utc()
+    log.info("=== Beisser Sync Starting | batch=%s ===", batch_id)
     state = load_state()
     total_rows = 0
-    errors = []
+    errors: List[str] = []
 
     try:
         src_conn = get_source_connection()
@@ -1021,6 +1194,13 @@ def main() -> None:
     geocoder = ShipToGeocoder(SHIPTO_GEOCODE_SETTINGS)
 
     try:
+        start_batch(cld_cur, batch_id)
+        cld_conn.commit()
+    except Exception as exc:
+        log.warning("Failed to record batch start: %s", exc)
+        cld_conn.rollback()
+
+    try:
         ensure_shipto_schema(cld_cur)
         cld_conn.commit()
     except Exception as exc:
@@ -1030,9 +1210,9 @@ def main() -> None:
     for config in TABLE_CONFIGS:
         try:
             if config.get("custom_sync") == "customer_shipto":
-                count = sync_customer_shipto(src_cur, cld_cur, config, state, geocoder)
+                count = sync_customer_shipto(src_cur, cld_cur, config, state, geocoder, batch_id=batch_id)
             else:
-                count = sync_table(src_cur, cld_cur, config, state)
+                count = sync_table(src_cur, cld_cur, config, state, batch_id=batch_id)
             total_rows += count
             cld_conn.commit()
         except Exception as e:
@@ -1042,12 +1222,23 @@ def main() -> None:
 
     save_state(state)
 
+    duration_ms = int((_now_utc() - batch_start).total_seconds() * 1000)
+    final_status = "error" if errors else "success"
+    try:
+        finish_batch(cld_cur, batch_id, final_status, total_rows, total_rows, duration_ms,
+                     error=f"Errors in: {', '.join(errors)}" if errors else None)
+        update_sync_state(cld_cur, final_status, total_rows, errors)
+        cld_conn.commit()
+    except Exception as exc:
+        log.warning("Failed to record batch finish: %s", exc)
+        cld_conn.rollback()
+
     src_cur.close()
     cld_cur.close()
     src_conn.close()
     cld_conn.close()
 
-    log.info("=== Sync Complete | %s rows | %s errors ===", total_rows, len(errors))
+    log.info("=== Sync Complete | batch=%s | %s rows | %s errors ===", batch_id, total_rows, len(errors))
     if errors:
         log.warning("Tables with errors: %s", ", ".join(errors))
 
