@@ -26,6 +26,7 @@ Set these before running:
 - `CLOUD_DB_USER`
 - `CLOUD_DB_PASSWORD`
 - `CLOUD_DB_SSLMODE` (default `require`)
+- `SYSTEM_ID`: ERP branch/system identifier injected into every mirrored row (e.g. `10FD`, `20GR`). Must match the `system_id` values used by other consumers of the `erp_mirror_*` tables. If your SQL Server source tables already include a branch identifier column, add it to the relevant `SELECT` as `... AS system_id` and remove it from the table's `inject_columns` config.
 
 Optional:
 

@@ -108,27 +108,23 @@ SHIPTO_GEOCODE_SETTINGS = {
 
 
 # ---------------------------------------------------------------------------
-# Tables synced by the main ERP sync worker (Vercel) into erp_mirror_* tables.
-# These are DISABLED here to avoid duplication.  The flat tables (customers,
-# dispatch_orders, inventory, sales_orders, sales_order_lines, etc.) on
-# Supabase were originally populated by this script but the data now lives
-# in the erp_mirror_* tables and should be consumed from there by po-app,
-# wh-tracker, and other front-end apps.
+# TABLE_CONFIGS — all Agility → erp_mirror_* sync jobs run by this Pi.
+#
+# Column aliases in source_query map Agility SQL Server names to the cloud
+# schema.  Verify these against your SQL Server schema and adjust if needed.
+#
+# inject_columns adds values not present in the source result set:
+#   - system_id  : set SYSTEM_ID env var to your branch code (e.g. '10FD').
+#                  If the SQL Server table already exposes a branch/system
+#                  column, include it in the SELECT instead and remove it here.
+#   - synced_at  : stamped to NOW() on every upsert.
+#   - is_deleted : always False on incremental sync (soft-delete logic TBD).
 # ---------------------------------------------------------------------------
-_DISABLED_TABLES = [
-    "dispatch_orders",   # → erp_mirror_shipments_header
-    "dispatch_routes",   # → no direct equivalent
-    "tag_print_queue",   # → erp_mirror_print_transaction
-    "sales_orders",      # → erp_mirror_so_header
-    "sales_order_lines", # → erp_mirror_so_detail
-    "customers",         # → erp_mirror_cust
-    "inventory",         # → erp_mirror_item
-    "inventory_alerts",  # → table does not exist in Agility
-    "receiving_checkin", # → erp_mirror_receiving_header
-    "purchase_orders",   # → erp_mirror_po_header
-]
 
 TABLE_CONFIGS = [
+    # ------------------------------------------------------------------
+    # customer_shipto: Pi-side geocoding enrichment on erp_mirror_cust_shipto.
+    # ------------------------------------------------------------------
     {
         "name": "customer_shipto",
         "cloud_table": "erp_mirror_cust_shipto",
@@ -142,12 +138,247 @@ TABLE_CONFIGS = [
         "use_prowid": False,
         "custom_sync": "customer_shipto",
     },
-    # customer_ar / erp_mirror_aropen: disabled pending migration to the main
-    # ERP sync worker.  The erp_mirror_aropen table uses a composite unique key
-    # (system_id, ref_num, ref_num_seq) plus required columns (synced_at,
-    # is_deleted, sync_batch_id) that the simple sync_table() cannot populate.
-    # Source table is dbo.aropen with watermark column update_date.
+    # ------------------------------------------------------------------
+    # shipments_header: dbo.dispatch_orders → erp_mirror_shipments_header
+    # KEY FIX: so_num (Agility) aliased to so_id (cloud schema).
+    # ------------------------------------------------------------------
+    {
+        "name": "shipments_header",
+        "cloud_table": "erp_mirror_shipments_header",
+        "source_query": """
+            SELECT
+                so_num          AS so_id,
+                seq_num         AS shipment_num,
+                ship_date,
+                billed_flag,
+                status_flag,
+                route_id        AS route_id_char,
+                print_status,
+                invoice_date,
+                expect_date,
+                loaded_date,
+                loaded_time,
+                driver,
+                delivery_status AS status_flag_delivery,
+                ship_via,
+                update_date     AS source_updated_at
+            FROM dbo.dispatch_orders
+            WHERE update_date > '{last_updated}'
+        """,
+        "pk": ["system_id", "so_id", "shipment_num"],
+        "watermark_col": "source_updated_at",
+        "use_prowid": False,
+        "inject_columns": {
+            "system_id": _get_system_id,
+            "synced_at": _now_utc,
+            "is_deleted": False,
+        },
+    },
+    # ------------------------------------------------------------------
+    # so_header: dbo.so_header → erp_mirror_so_header
+    # ------------------------------------------------------------------
+    {
+        "name": "so_header",
+        "cloud_table": "erp_mirror_so_header",
+        "source_query": """
+            SELECT
+                so_num          AS so_id,
+                so_status,
+                sale_type,
+                cust_num        AS cust_key,
+                shipto_seq      AS shipto_seq_num,
+                reference,
+                expect_date,
+                ent_date        AS created_date,
+                invoice_date,
+                ship_date,
+                promise_date,
+                ship_via,
+                terms,
+                salesperson,
+                cust_po_num     AS po_number,
+                branch_code,
+                update_date     AS source_updated_at
+            FROM dbo.so_header
+            WHERE update_date > '{last_updated}'
+        """,
+        "pk": ["system_id", "so_id"],
+        "watermark_col": "source_updated_at",
+        "use_prowid": False,
+        "inject_columns": {
+            "system_id": _get_system_id,
+            "synced_at": _now_utc,
+            "is_deleted": False,
+        },
+    },
+    # ------------------------------------------------------------------
+    # so_detail: dbo.so_detail → erp_mirror_so_detail
+    # ------------------------------------------------------------------
+    {
+        "name": "so_detail",
+        "cloud_table": "erp_mirror_so_detail",
+        "source_query": """
+            SELECT
+                so_num          AS so_id,
+                seq_num         AS sequence,
+                item_ptr,
+                qty_ord         AS qty_ordered,
+                size_,
+                so_desc,
+                price,
+                price_uom_ptr,
+                bo,
+                update_date     AS source_updated_at
+            FROM dbo.so_detail
+            WHERE update_date > '{last_updated}'
+        """,
+        "pk": ["system_id", "so_id", "sequence"],
+        "watermark_col": "source_updated_at",
+        "use_prowid": False,
+        "inject_columns": {
+            "system_id": _get_system_id,
+            "synced_at": _now_utc,
+            "is_deleted": False,
+        },
+    },
+    # ------------------------------------------------------------------
+    # customers: dbo.cust → erp_mirror_cust
+    # ------------------------------------------------------------------
+    {
+        "name": "customers",
+        "cloud_table": "erp_mirror_cust",
+        "source_query": """
+            SELECT
+                cust_num        AS cust_key,
+                cust_code,
+                cust_name,
+                phone,
+                email,
+                balance,
+                credit_limit,
+                credit_account,
+                cust_type,
+                branch_code,
+                update_date     AS source_updated_at
+            FROM dbo.cust
+            WHERE update_date > '{last_updated}'
+        """,
+        "pk": ["system_id", "cust_key"],
+        "watermark_col": "source_updated_at",
+        "use_prowid": False,
+        "inject_columns": {
+            "system_id": _get_system_id,
+            "synced_at": _now_utc,
+            "is_deleted": False,
+        },
+    },
+    # ------------------------------------------------------------------
+    # po_header: dbo.po_header → erp_mirror_po_header
+    # ------------------------------------------------------------------
+    {
+        "name": "po_header",
+        "cloud_table": "erp_mirror_po_header",
+        "source_query": """
+            SELECT
+                po_num              AS po_id,
+                purchase_type,
+                vend_num            AS supplier_key,
+                shipfrom_seq,
+                order_date,
+                expect_date,
+                due_date,
+                buyer,
+                reference,
+                ship_via,
+                current_receive_no,
+                po_status,
+                canceled,
+                wms_status,
+                received_manually,
+                mwt_recv_complete,
+                mwt_recv_complete_datetime,
+                ent_date            AS created_date,
+                update_date         AS source_updated_at
+            FROM dbo.po_header
+            WHERE update_date > '{last_updated}'
+        """,
+        "pk": ["system_id", "po_id"],
+        "watermark_col": "source_updated_at",
+        "use_prowid": False,
+        "inject_columns": {
+            "system_id": _get_system_id,
+            "synced_at": _now_utc,
+            "is_deleted": False,
+        },
+    },
+    # ------------------------------------------------------------------
+    # receiving_header: dbo.receiving_checkin → erp_mirror_receiving_header
+    # ------------------------------------------------------------------
+    {
+        "name": "receiving_header",
+        "cloud_table": "erp_mirror_receiving_header",
+        "source_query": """
+            SELECT
+                po_num          AS po_id,
+                recv_seq        AS receive_num,
+                recv_date       AS receive_date,
+                recv_status,
+                packing_slip,
+                wms_user,
+                wms_dispatch_id,
+                recv_comment,
+                ent_date        AS created_date,
+                update_date     AS source_updated_at
+            FROM dbo.receiving_checkin
+            WHERE update_date > '{last_updated}'
+        """,
+        "pk": ["system_id", "po_id", "receive_num"],
+        "watermark_col": "source_updated_at",
+        "use_prowid": False,
+        "inject_columns": {
+            "system_id": _get_system_id,
+            "synced_at": _now_utc,
+            "is_deleted": False,
+        },
+    },
+    # ------------------------------------------------------------------
+    # print_transaction: dbo.tag_print_queue → erp_mirror_print_transaction
+    # ------------------------------------------------------------------
+    {
+        "name": "print_transaction",
+        "cloud_table": "erp_mirror_print_transaction",
+        "source_query": """
+            SELECT
+                tran_id,
+                tran_type,
+                created_at,
+                update_date     AS source_updated_at
+            FROM dbo.tag_print_queue
+            WHERE update_date > '{last_updated}'
+        """,
+        "pk": ["tran_id", "tran_type"],
+        "watermark_col": "source_updated_at",
+        "use_prowid": False,
+        "inject_columns": {
+            "system_id": _get_system_id,
+            "synced_at": _now_utc,
+            "is_deleted": False,
+        },
+    },
+    # customer_ar / erp_mirror_aropen: disabled — the erp_mirror_aropen table
+    # uses a composite unique key (system_id, ref_num, ref_num_seq).
+    # Source: dbo.aropen, watermark: update_date.
 ]
+
+
+def _now_utc() -> datetime:
+    """Return current UTC time without tzinfo (for Postgres TIMESTAMP WITHOUT TIME ZONE)."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _get_system_id() -> str:
+    """Return the configured ERP system/branch identifier (e.g. '10FD', '20GR')."""
+    return os.getenv("SYSTEM_ID", "")
 
 
 def get_source_connection():
@@ -418,6 +649,7 @@ def sync_table(src_cur, cld_cur, config: dict, state: dict) -> int:
     pk_config = config["pk"]
     pk_columns = [pk_config] if isinstance(pk_config, str) else pk_config
     use_prowid = config["use_prowid"]
+    inject = config.get("inject_columns", {})
 
     if use_prowid:
         last_val = state.get(name, {}).get("last_prowid", 0)
@@ -440,13 +672,15 @@ def sync_table(src_cur, cld_cur, config: dict, state: dict) -> int:
         return 0
 
     columns = [col[0] for col in src_cur.description]
+    # Build the full column list: source columns plus any injected columns not already present.
+    all_columns = list(columns) + [c for c in inject if c not in columns]
     row_count = 0
     new_watermark = last_val
 
-    insert_cols = [sql.Identifier(c) for c in columns]
+    insert_cols = [sql.Identifier(c) for c in all_columns]
     updates = [
         sql.SQL("{} = EXCLUDED.{}").format(sql.Identifier(c), sql.Identifier(c))
-        for c in columns
+        for c in all_columns
         if c not in pk_columns
     ]
     insert_stmt = sql.SQL(
@@ -454,7 +688,7 @@ def sync_table(src_cur, cld_cur, config: dict, state: dict) -> int:
     ).format(
         sql.Identifier(cloud_table),
         sql.SQL(", ").join(insert_cols),
-        sql.SQL(", ").join(sql.Placeholder() for _ in columns),
+        sql.SQL(", ").join(sql.Placeholder() for _ in all_columns),
         sql.SQL(", ").join(sql.Identifier(c) for c in pk_columns),
         sql.SQL(", ").join(updates),
     )
@@ -462,8 +696,13 @@ def sync_table(src_cur, cld_cur, config: dict, state: dict) -> int:
     for row in rows:
         row_dict = dict(zip(columns, row))
 
+        # Merge injected column values. Source values take precedence if already present.
+        for col, val in inject.items():
+            if col not in row_dict:
+                row_dict[col] = val() if callable(val) else val
+
         try:
-            cld_cur.execute(insert_stmt, [row_dict[c] for c in columns])
+            cld_cur.execute(insert_stmt, [row_dict.get(c) for c in all_columns])
             row_count += 1
 
             if use_prowid and row_dict.get("prowid", 0) > new_watermark:
