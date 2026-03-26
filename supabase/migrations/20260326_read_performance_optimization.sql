@@ -86,7 +86,7 @@ LEFT JOIN erp_mirror_cust c
 LEFT JOIN erp_mirror_cust_shipto cs
     ON  cs.system_id = soh.system_id
     AND cs.cust_key  = soh.cust_key
-    AND cs.seq_num   = soh.shipto_seq_num
+    AND cs.seq_num   = soh.shipto_seq_num::integer
 WHERE soh.is_deleted = false
   AND soh.so_status  = 'K'
   AND COALESCE(sod.bo, 0) = 0
