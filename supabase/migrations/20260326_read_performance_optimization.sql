@@ -190,9 +190,8 @@ CREATE INDEX IF NOT EXISTS
     idx_po_header_po_id_trgm
     ON erp_mirror_po_header USING gin (po_id::text gin_trgm_ops);
 
-CREATE INDEX IF NOT EXISTS
-    idx_po_header_supplier_name_trgm
-    ON erp_mirror_po_header USING gin (supplier_name gin_trgm_ops);
+-- NOTE: supplier_name does not exist on erp_mirror_po_header.
+-- If app_po_search joins to a supplier table, add the trigram index there.
 
 CREATE INDEX IF NOT EXISTS
     idx_po_header_reference_trgm
