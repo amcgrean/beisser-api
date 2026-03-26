@@ -36,9 +36,11 @@ There is **one worker** (`WORKER_NAME = "agility-pi-sync"`). A previously separa
 | 30CD      | —          | defunct |
 | 00CO      | Corporate  | master tables only, no orders |
 
-`system_id` is read from the `loc_id` column of each Agility source table — it
-is **not** an environment variable. The Pi serves all branches from a single
-SQL Server instance.
+`system_id` is read from the `loc_id` column of each Agility **operational**
+table (dispatch_orders, so_header, so_detail, po_header, receiving_checkin,
+tag_print_queue). **Master** tables (cust, cust_shipto) do not have `loc_id`;
+their `system_id` is injected as `'00CO'` (corporate) via `inject_columns`.
+The Pi serves all branches from a single SQL Server instance.
 
 ---
 
@@ -49,7 +51,7 @@ cloud schema. Verify against the live SQL Server schema if queries fail.
 
 | Agility column  | Cloud alias       | Tables                             |
 |-----------------|-------------------|------------------------------------|
-| `loc_id`        | `system_id`       | all tables                         |
+| `loc_id`        | `system_id`       | operational tables only            |
 | `so_num`        | `so_id`           | dispatch_orders, so_header, so_detail |
 | `seq_num`       | `shipment_num`    | dispatch_orders                    |
 | `seq_num`       | `sequence`        | so_detail                          |
@@ -82,6 +84,10 @@ cloud schema. Verify against the live SQL Server schema if queries fail.
 | print_transaction  | dbo.tag_print_queue     | erp_mirror_print_transaction     | operational |
 
 All tables use `update_date`-based watermark incremental sync (`use_prowid: False`).
+
+Master tables (`cust`, `cust_shipto`) inject `system_id = '00CO'` because
+customers/ship-tos are shared across all branches. Operational tables read
+`system_id` from the Agility `loc_id` column.
 
 ---
 

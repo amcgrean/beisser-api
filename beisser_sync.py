@@ -125,28 +125,15 @@ SHIPTO_GEOCODE_SETTINGS = {
 TABLE_CONFIGS = [
     # ------------------------------------------------------------------
     # customer_shipto: full upsert + Pi-side geocoding enrichment.
-    # loc_id provides system_id; prowid aliased for source tracking.
+    # Master table — system_id injected as '00CO' (corporate); SELECT *
+    # with column mapping handled by transform_shipto_row().
     # ------------------------------------------------------------------
     {
         "name": "customer_shipto",
         "cloud_table": "erp_mirror_cust_shipto",
         "family": "master",
         "source_query": """
-            SELECT
-                loc_id          AS system_id,
-                cust_key,
-                seq_num,
-                shipto_name,
-                address_1,
-                address_2,
-                city,
-                state,
-                zip,
-                attention,
-                phone,
-                branch_code,
-                prowid          AS source_prowid,
-                update_date     AS source_updated_at
+            SELECT *
             FROM dbo.cust_shipto
             WHERE update_date > '{last_updated}'
         """,
@@ -154,6 +141,11 @@ TABLE_CONFIGS = [
         "watermark_col": "source_updated_at",
         "use_prowid": False,
         "custom_sync": "customer_shipto",
+        "inject_columns": {
+            "system_id": "00CO",
+            "synced_at": _now_utc,
+            "is_deleted": False,
+        },
     },
     # ------------------------------------------------------------------
     # shipments_header: dbo.dispatch_orders → erp_mirror_shipments_header
@@ -263,6 +255,7 @@ TABLE_CONFIGS = [
     },
     # ------------------------------------------------------------------
     # customers: dbo.cust → erp_mirror_cust
+    # Master table — system_id injected as '00CO' (corporate).
     # ------------------------------------------------------------------
     {
         "name": "customers",
@@ -270,7 +263,6 @@ TABLE_CONFIGS = [
         "family": "master",
         "source_query": """
             SELECT
-                loc_id          AS system_id,
                 cust_num        AS cust_key,
                 cust_code,
                 cust_name,
@@ -289,6 +281,7 @@ TABLE_CONFIGS = [
         "watermark_col": "source_updated_at",
         "use_prowid": False,
         "inject_columns": {
+            "system_id": "00CO",
             "synced_at": _now_utc,
             "is_deleted": False,
         },
@@ -1031,11 +1024,18 @@ def sync_customer_shipto(src_cur, cld_cur, config: dict, state: dict, geocoder: 
         return 0
 
     watermark_col = config.get("watermark_col", "prowid")
+    inject = config.get("inject_columns", {})
     transformed: List[dict] = []
     new_watermark = last_val
     for row in rows:
         source = dict(zip(source_columns, row))
         transformed_row = transform_shipto_row(source)
+
+        # Apply inject_columns defaults for fields not in source (e.g. system_id='00CO')
+        for col, val in inject.items():
+            if col not in transformed_row or transformed_row[col] is None:
+                transformed_row[col] = val() if callable(val) else val
+
         transformed.append(transformed_row)
 
         if use_prowid:
