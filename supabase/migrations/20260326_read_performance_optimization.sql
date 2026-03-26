@@ -76,7 +76,7 @@ SELECT
 FROM erp_mirror_so_detail  sod
 JOIN erp_mirror_so_header   soh
     ON  soh.system_id = sod.system_id
-    AND soh.so_id     = sod.so_id
+    AND soh.so_id     = sod.so_id::text
 LEFT JOIN erp_mirror_item_branch ib
     ON  ib.system_id = sod.system_id
     AND ib.item_ptr  = sod.item_ptr
