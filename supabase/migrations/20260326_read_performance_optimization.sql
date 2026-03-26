@@ -150,11 +150,11 @@ CREATE INDEX IF NOT EXISTS
 -- B2. INDEXES on erp_mirror_po_detail (backs app_po_detail view)
 -- -------------------------------------------------------------------------
 
--- Lookup by po_id with line_number for ORDER BY
+-- Lookup by po_id with sequence for ORDER BY
 CREATE INDEX IF NOT EXISTS
     idx_po_detail_po_id
     ON erp_mirror_po_detail (po_id)
-    INCLUDE (line_number);
+    INCLUDE (sequence);
 
 -- Composite join path if views join on system_id + po_id
 CREATE INDEX IF NOT EXISTS
@@ -172,16 +172,13 @@ CREATE INDEX IF NOT EXISTS
 -- CREATE INDEX IF NOT EXISTS
 --     idx_po_receiving_po_id
 --     ON erp_mirror_po_receiving (po_id);
--- CREATE INDEX IF NOT EXISTS
---     idx_po_receiving_po_number
---     ON erp_mirror_po_receiving (po_number);
 --
 -- ^^^ UNCOMMENT after confirming the backing table name.
 
 
 -- -------------------------------------------------------------------------
 -- B4. TRIGRAM INDEXES for ILIKE search on app_po_search
---     Accelerates: or(po_number.ilike.%q%, supplier_name.ilike.%q%, reference.ilike.%q%)
+--     Accelerates: or(po_id.ilike.%q%, supplier_name.ilike.%q%, reference.ilike.%q%)
 -- -------------------------------------------------------------------------
 
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
@@ -283,19 +280,18 @@ GRANT EXECUTE ON FUNCTION get_branch_open_pos(text, integer) TO anon, authentica
 --
 --     CONTRACT:
 --       - header: full row from app_po_header (null if not found)
---       - lines: array from app_po_detail ordered by line_number ASC
+--       - lines: array from app_po_detail ordered by sequence ASC
 --                (empty array if none)
 --       - receiving_summary: full row from app_po_receiving_summary
 --                            (null if not found)
---       - filter_col must be 'po_id' or 'po_number'
+--       - filter_col must be 'po_id'
 --       - po_id path: numeric string lookup (e.g. '12345')
---       - po_number path: alphanumeric lookup (e.g. 'PO-12345')
 --       - Nullability: header/receiving_summary may be JSON null;
 --                      lines is always an array (possibly empty)
 -- -------------------------------------------------------------------------
 
 CREATE OR REPLACE FUNCTION get_po_detail(
-    filter_col  text,    -- 'po_id' or 'po_number'
+    filter_col  text,    -- 'po_id'
     filter_val  text
 )
 RETURNS jsonb
@@ -310,39 +306,23 @@ DECLARE
     recv  jsonb;
 BEGIN
     -- Whitelist filter_col to prevent injection
-    IF filter_col NOT IN ('po_id', 'po_number') THEN
-        RAISE EXCEPTION 'Invalid filter column: %. Must be po_id or po_number.', filter_col;
+    IF filter_col NOT IN ('po_id') THEN
+        RAISE EXCEPTION 'Invalid filter column: %. Must be po_id.', filter_col;
     END IF;
 
-    IF filter_col = 'po_id' THEN
-        SELECT to_jsonb(h) INTO hdr
-          FROM app_po_header h
-         WHERE h.po_id::text = filter_val
-         LIMIT 1;
+    SELECT to_jsonb(h) INTO hdr
+      FROM app_po_header h
+     WHERE h.po_id::text = filter_val
+     LIMIT 1;
 
-        SELECT COALESCE(jsonb_agg(d ORDER BY d.line_number), '[]'::jsonb) INTO lines
-          FROM app_po_detail d
-         WHERE d.po_id::text = filter_val;
+    SELECT COALESCE(jsonb_agg(d ORDER BY d.sequence), '[]'::jsonb) INTO lines
+      FROM app_po_detail d
+     WHERE d.po_id::text = filter_val;
 
-        SELECT to_jsonb(r) INTO recv
-          FROM app_po_receiving_summary r
-         WHERE r.po_id::text = filter_val
-         LIMIT 1;
-    ELSE
-        SELECT to_jsonb(h) INTO hdr
-          FROM app_po_header h
-         WHERE h.po_number = filter_val
-         LIMIT 1;
-
-        SELECT COALESCE(jsonb_agg(d ORDER BY d.line_number), '[]'::jsonb) INTO lines
-          FROM app_po_detail d
-         WHERE d.po_number = filter_val;
-
-        SELECT to_jsonb(r) INTO recv
-          FROM app_po_receiving_summary r
-         WHERE r.po_number = filter_val
-         LIMIT 1;
-    END IF;
+    SELECT to_jsonb(r) INTO recv
+      FROM app_po_receiving_summary r
+     WHERE r.po_id::text = filter_val
+     LIMIT 1;
 
     result := jsonb_build_object(
         'header',            COALESCE(hdr,   'null'::jsonb),
