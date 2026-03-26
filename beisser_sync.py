@@ -1176,7 +1176,35 @@ def sync_customer_shipto(src_cur, cld_cur, config: dict, state: dict, geocoder: 
     return row_count
 
 
+LOCK_FILE = Path(os.getenv("BEISSER_SYNC_LOCK_FILE", "/tmp/beisser_sync.lock"))
+
+
+def acquire_lock() -> bool:
+    """Return True if lock acquired, False if another instance is running."""
+    if LOCK_FILE.exists():
+        try:
+            pid = int(LOCK_FILE.read_text().strip())
+            # Check if that PID is still alive
+            Path(f"/proc/{pid}").stat()
+            log.warning("Another sync instance is running (pid=%s). Exiting.", pid)
+            return False
+        except (ValueError, FileNotFoundError, OSError):
+            pass  # Stale lock — take it
+    LOCK_FILE.write_text(str(os.getpid()))
+    return True
+
+
+def release_lock() -> None:
+    try:
+        LOCK_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
 def main() -> None:
+    if not acquire_lock():
+        return
+
     batch_id = uuid.uuid4().hex
     batch_start = _now_utc()
     log.info("=== Beisser Sync Starting | batch=%s ===", batch_id)
@@ -1200,13 +1228,6 @@ def main() -> None:
         cld_conn.commit()
     except Exception as exc:
         log.warning("Failed to record batch start: %s", exc)
-        cld_conn.rollback()
-
-    try:
-        ensure_shipto_schema(cld_cur)
-        cld_conn.commit()
-    except Exception as exc:
-        log.error("Schema/bootstrap failed for erp_mirror_cust_shipto: %s", exc)
         cld_conn.rollback()
 
     for config in TABLE_CONFIGS:
@@ -1240,6 +1261,7 @@ def main() -> None:
     src_conn.close()
     cld_conn.close()
 
+    release_lock()
     log.info("=== Sync Complete | batch=%s | %s rows | %s errors ===", batch_id, total_rows, len(errors))
     if errors:
         log.warning("Tables with errors: %s", ", ".join(errors))
