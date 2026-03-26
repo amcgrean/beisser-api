@@ -188,7 +188,7 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
 CREATE INDEX IF NOT EXISTS
     idx_po_header_po_id_trgm
-    ON erp_mirror_po_header USING gin (po_id gin_trgm_ops);
+    ON erp_mirror_po_header USING gin (po_id::text gin_trgm_ops);
 
 CREATE INDEX IF NOT EXISTS
     idx_po_header_supplier_name_trgm
