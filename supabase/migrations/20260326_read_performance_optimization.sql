@@ -186,12 +186,9 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;
 -- NOTE: These target erp_mirror_po_header assuming app_po_search is a view
 -- over it. If app_po_search has a different backing table, move these indexes.
 
-CREATE INDEX IF NOT EXISTS
-    idx_po_header_po_id_trgm
-    ON erp_mirror_po_header USING gin (po_id::text gin_trgm_ops);
-
--- NOTE: supplier_name does not exist on erp_mirror_po_header.
--- If app_po_search joins to a supplier table, add the trigram index there.
+-- po_id is integer — exact match via B-tree index (idx_po_header_po_id) is sufficient.
+-- supplier_name does not exist on erp_mirror_po_header — add trigram on the
+-- actual supplier table once identified.
 
 CREATE INDEX IF NOT EXISTS
     idx_po_header_reference_trgm
@@ -356,8 +353,6 @@ GRANT EXECUTE ON FUNCTION get_po_detail(text, text) TO anon, authenticated;
 -- DROP INDEX IF EXISTS idx_po_header_synced_at;
 -- DROP INDEX IF EXISTS idx_po_detail_po_id;
 -- DROP INDEX IF EXISTS idx_po_detail_system_po;
--- DROP INDEX IF EXISTS idx_po_header_po_id_trgm;
--- DROP INDEX IF EXISTS idx_po_header_supplier_name_trgm;
 -- DROP INDEX IF EXISTS idx_po_header_reference_trgm;
 -- DROP INDEX IF EXISTS idx_submissions_po_number;
 -- DROP INDEX IF EXISTS idx_submissions_po_branch;
