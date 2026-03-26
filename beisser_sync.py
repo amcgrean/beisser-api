@@ -108,6 +108,14 @@ SHIPTO_GEOCODE_SETTINGS = {
 }
 
 
+WORKER_NAME = "agility-pi-sync"
+
+
+def _now_utc() -> datetime:
+    """Return current UTC time without tzinfo (for Postgres TIMESTAMP WITHOUT TIME ZONE)."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
 # ---------------------------------------------------------------------------
 # TABLE_CONFIGS — all Agility → erp_mirror_* sync jobs run by this Pi.
 #
@@ -115,9 +123,8 @@ SHIPTO_GEOCODE_SETTINGS = {
 # schema.  Verify these against your SQL Server schema and adjust if needed.
 #
 # inject_columns adds values not present in the source result set:
-#   - system_id  : set SYSTEM_ID env var to your branch code (e.g. '10FD').
-#                  If the SQL Server table already exposes a branch/system
-#                  column, include it in the SELECT instead and remove it here.
+#   - system_id  : '00CO' for master tables (cust, cust_shipto); operational
+#                  tables read loc_id AS system_id from the SQL Server source.
 #   - synced_at  : stamped to NOW() on every upsert.
 #   - is_deleted : always False on incremental sync (soft-delete logic TBD).
 # ---------------------------------------------------------------------------
@@ -386,14 +393,6 @@ TABLE_CONFIGS = [
     # uses a composite unique key (system_id, ref_num, ref_num_seq).
     # Source: dbo.aropen, watermark: update_date.
 ]
-
-
-WORKER_NAME = "agility-pi-sync"
-
-
-def _now_utc() -> datetime:
-    """Return current UTC time without tzinfo (for Postgres TIMESTAMP WITHOUT TIME ZONE)."""
-    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 # ---------------------------------------------------------------------------
@@ -1067,8 +1066,8 @@ def sync_customer_shipto(src_cur, cld_cur, config: dict, state: dict, geocoder: 
         "system_id", "cust_key", "seq_num",
         "shipto_name", "address_1", "address_2",
         "city", "state", "zip",
-        "attention", "phone", "branch_code",
-        "source_prowid", "source_updated_at",
+        "phone", "branch_code",
+        "source_updated_at",
         "lat", "lon", "geocoded_at", "geocode_source",
         "synced_at", "is_deleted",
     ]
