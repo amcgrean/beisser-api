@@ -39,7 +39,7 @@ CREATE INDEX IF NOT EXISTS
 CREATE INDEX IF NOT EXISTS
     idx_so_detail_so_lookup
     ON erp_mirror_so_detail (system_id, so_id)
-    INCLUDE (item_ptr, sequence, backordered_qty);
+    INCLUDE (item_ptr, sequence, bo);
 
 -- item_branch: join on (system_id, item_ptr), covers handling_code
 CREATE INDEX IF NOT EXISTS
@@ -89,7 +89,7 @@ LEFT JOIN erp_mirror_cust_shipto cs
     AND cs.seq_num   = soh.shipto_seq_num
 WHERE soh.is_deleted = false
   AND soh.so_status  = 'K'
-  AND COALESCE(sod.backordered_qty, 0) = 0
+  AND COALESCE(sod.bo, 0) = 0
 GROUP BY
     soh.so_id,
     c.cust_name,
