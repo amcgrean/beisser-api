@@ -335,7 +335,43 @@ OPERATIONAL_DEFINITIONS = [
     ),
     ExtractorDefinition(
         name="po_header",
-        source_table="dbo.po_header",
+        source_table="""
+            (
+                SELECT
+                    h.system_id,
+                    h.po_id,
+                    h.purchase_type,
+                    sname.supplier_code,
+                    sup.ship_from_name AS supplier_name,
+                    h.shipfrom_seq,
+                    h.order_date,
+                    h.expect_date,
+                    h.due_date,
+                    h.buyer,
+                    h.reference,
+                    h.ship_via,
+                    h.current_receive_no,
+                    h.po_status,
+                    h.canceled,
+                    h.wms_status,
+                    h.received_manually,
+                    h.mwt_recv_complete,
+                    h.mwt_recv_complete_datetime,
+                    h.created_date,
+                    h.update_date,
+                    h.pro2modified
+                FROM dbo.po_header h
+                LEFT JOIN dbo.cust_shipto cs
+                    ON cs.system_id = h.system_id
+                   AND cs.cust_key = h.cust_key
+                   AND cs.seq_num = h.shipfrom_seq
+                LEFT JOIN dbo.supp_ship_from sup
+                    ON sup.supplier_key = h.supplier_key
+                   AND sup.seq_num = h.shipfrom_seq
+                LEFT JOIN dbo.suppname sname
+                    ON sname.supplier_key = h.supplier_key
+            ) po_header
+        """,
         target_table="erp_mirror_po_header",
         model=ERPMirrorPurchaseOrderHeader,
         family=SyncFamily.OPERATIONAL,
@@ -347,7 +383,8 @@ OPERATIONAL_DEFINITIONS = [
             "system_id": "system_id",
             "po_id": "po_id",
             "purchase_type": "purchase_type",
-            "supplier_key": "supplier_key",
+            "supplier_code": "supplier_code",
+            "supplier_name": "supplier_name",
             "shipfrom_seq": "shipfrom_seq",
             "order_date": "order_date",
             "expect_date": "expect_date",
