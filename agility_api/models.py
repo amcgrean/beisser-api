@@ -98,7 +98,7 @@ class ERPMirrorCustomerShipTo(Base, MirrorSyncMetadataMixin):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     system_id: Mapped[str | None] = mapped_column(String(32), index=True)
     cust_key: Mapped[str] = mapped_column(String(64), index=True)
-    seq_num: Mapped[int] = mapped_column(Integer)
+    seq_num: Mapped[str] = mapped_column(String(32))
     shipto_name: Mapped[str | None] = mapped_column(String(255))
     address_1: Mapped[str | None] = mapped_column(String(255))
     address_2: Mapped[str | None] = mapped_column(String(255))
@@ -203,7 +203,7 @@ class ERPMirrorSalesOrderDetail(Base, MirrorSyncMetadataMixin):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     system_id: Mapped[str | None] = mapped_column(String(32), index=True)
-    so_id: Mapped[int] = mapped_column(Integer, index=True)
+    so_id: Mapped[str] = mapped_column(String(64), index=True)
     sequence: Mapped[int] = mapped_column(Integer)
     item_ptr: Mapped[int | None] = mapped_column(Integer, index=True)
     qty_ordered: Mapped[float | None] = mapped_column(Numeric(18, 4))
@@ -220,7 +220,7 @@ class ERPMirrorShipmentHeader(Base, MirrorSyncMetadataMixin):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     system_id: Mapped[str | None] = mapped_column(String(32), index=True)
-    so_id: Mapped[int] = mapped_column(Integer, index=True)
+    so_id: Mapped[str] = mapped_column(String(64), index=True)
     shipment_num: Mapped[int] = mapped_column(Integer)
     ship_date: Mapped[datetime | None] = mapped_column(DateTime)
     billed_flag: Mapped[str | None] = mapped_column(String(16))
@@ -242,7 +242,7 @@ class ERPMirrorShipmentDetail(Base, MirrorSyncMetadataMixin):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     system_id: Mapped[str | None] = mapped_column(String(32), index=True)
-    so_id: Mapped[int] = mapped_column(Integer, index=True)
+    so_id: Mapped[str] = mapped_column(String(64), index=True)
     shipment_num: Mapped[int] = mapped_column(Integer)
     sequence: Mapped[int] = mapped_column(Integer)
     qty: Mapped[float | None] = mapped_column(Numeric(18, 4))
